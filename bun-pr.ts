@@ -114,14 +114,33 @@ const { data: prData } = await octokit.pulls.get({
 const headSha = prData.head.sha;
 
 // List workflow runs for the repo and find the latest successful run for the PR's commit SHA
-const { data: runsData } = await octokit.actions.listWorkflowRunsForRepo({
-  owner: REPO_OWNER,
-  repo: REPO_NAME,
-  event: "pull_request",
-  status: "completed",
-  branch: prData.head.ref, // Filter by branch associated with the PR
-  per_page: 100, // Fetch up to 100 workflow runs
-});
+const [
+  {
+    data: { workflow_runs: completedRunsData = [] },
+  },
+  {
+    data: { workflow_runs: inProgressRunsData = [] },
+  },
+] = await Promise.all([
+  octokit.actions.listWorkflowRunsForRepo({
+    owner: REPO_OWNER,
+    repo: REPO_NAME,
+    event: "pull_request",
+    status: "completed",
+    branch: prData.head.ref, // Filter by branch associated with the PR
+    per_page: 100, // Fetch up to 100 workflow runs
+  }),
+  octokit.actions.listWorkflowRunsForRepo({
+    owner: REPO_OWNER,
+    repo: REPO_NAME,
+    event: "pull_request",
+    status: "in_progress",
+    branch: prData.head.ref, // Filter by branch associated with the PR
+    per_page: 100, // Fetch up to 100 workflow runs
+  }),
+]);
+
+const runsData = [...completedRunsData, ...inProgressRunsData];
 
 function isPossibleRun(name) {
   name = name.toLowerCase();
@@ -137,9 +156,9 @@ function isPossibleRun(name) {
     name.includes("darwin")
   );
 }
-const workflowRuns = runsData.workflow_runs.filter(
-  (run) => run.head_sha === headSha && isPossibleRun(run.name!)
-);
+const workflowRuns = runsData
+  .filter((run) => isPossibleRun(run.name!) && run.run_started_at)
+  .sort((a, b) => b.run_started_at!.localeCompare(a.run_started_at!));
 
 if (!workflowRuns.length) {
   console.log("No successful workflow run found for this PR.");
@@ -161,6 +180,15 @@ for (const workflowRun of workflowRuns) {
   if (!artifact) {
     continue;
   }
+
+  console.log(
+    "Choosing artifact from run that started",
+    new Intl.DateTimeFormat(undefined, {
+      timeStyle: "medium",
+      dateStyle: "medium",
+      formatMatcher: "best fit",
+    }).format(new Date(workflowRun.run_started_at!))
+  );
 
   // Download the artifact
   const artifactResponse = await octokit.actions.downloadArtifact({
