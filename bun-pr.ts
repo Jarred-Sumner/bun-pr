@@ -2,7 +2,7 @@
 
 import { Octokit } from "@octokit/rest";
 import { $ } from "bun";
-import { readdirSync, symlinkSync } from "fs";
+import { realpathSync, readdirSync, symlinkSync } from "fs";
 import { dirname } from "path";
 
 $.throws(true);
@@ -80,7 +80,7 @@ const PR_ID = await (async () => {
   } else {
     // resolve branch name to PR number from argv
     const branch = last;
-    const { data: prs } = await octokit.pulls.list({
+    let { data: prs = [] } = await octokit.pulls.list({
       owner: REPO_OWNER,
       repo: REPO_NAME,
       state: "open",
@@ -90,6 +90,17 @@ const PR_ID = await (async () => {
     if (prs.length) {
       return prs[0].number;
     } else {
+      ({ data: prs = [] } = await octokit.pulls.list({
+        owner: REPO_OWNER,
+        repo: REPO_NAME,
+        state: "closed",
+        head: `${REPO_OWNER}:${branch}`,
+      }));
+
+      if (prs.length) {
+        return prs[0].number;
+      }
+
       throw new Error(`No open PR found for branch ${branch}`);
     }
   }
