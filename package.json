@@ -1,6 +1,6 @@
 {
   "name": "bun-pr",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "module": "bun-pr.ts",
   "type": "module",
   "bin": {
