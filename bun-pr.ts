@@ -8,6 +8,7 @@ import { dirname } from "path";
 $.throws(true);
 const cwd = realpathSync(import.meta.dir);
 $.cwd(cwd);
+process.chdir(cwd);
 
 const GITHUB_TOKEN =
   process.env.GITHUB_TOKEN || (await $`gh auth token`.text()).trim(); // Replace with your GitHub token
