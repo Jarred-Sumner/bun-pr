@@ -29,6 +29,16 @@ const IS_PROFILE = (() => {
   }
 })();
 
+const IS_BASELINE = (() => {
+  const profileIndex = process.argv.findIndex((a) => a === "--baseline");
+  if (profileIndex !== -1) {
+    process.argv.splice(profileIndex, 1);
+    return true;
+  } else {
+    return false;
+  }
+})();
+
 const ARTIFACT_NAME = (() => {
   let basename = "bun-";
   if (process.platform === "win32") {
@@ -43,6 +53,10 @@ const ARTIFACT_NAME = (() => {
     basename += "-x64";
   } else if (process.arch === "arm64") {
     basename += "-aarch64";
+  }
+
+  if (IS_BASELINE) {
+    basename += "-baseline";
   }
 
   if (IS_PROFILE) {
@@ -171,7 +185,7 @@ function isPossibleRun(name) {
   );
 }
 const workflowRuns = runsData
-  .filter((run) => isPossibleRun(run.name!) && run.run_started_at)
+  .filter((run) => run.name?.toLowerCase() === "ci" && run.run_started_at)
   .sort((a, b) => b.run_started_at!.localeCompare(a.run_started_at!));
 
 if (!workflowRuns.length) {
