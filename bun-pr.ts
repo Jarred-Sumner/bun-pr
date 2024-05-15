@@ -167,17 +167,12 @@ const [
     per_page: 100, // Fetch up to 100 workflow runs
   }),
 ]);
-
 const runsData = [...completedRunsData, ...inProgressRunsData];
-
 function isPossibleRun(name) {
   name = name.toLowerCase();
 
-  if (!name.startsWith("bun-")) {
-    return false;
-  }
-
   return (
+    name.includes("ci") ||
     name.includes("macos") ||
     name.includes("linux") ||
     name.includes("windows") ||
@@ -185,7 +180,7 @@ function isPossibleRun(name) {
   );
 }
 const workflowRuns = runsData
-  .filter((run) => run.name?.toLowerCase() === "ci" && run.run_started_at)
+  .filter((run) => isPossibleRun(run.name!) && run.run_started_at)
   .sort((a, b) => b.run_started_at!.localeCompare(a.run_started_at!));
 
 if (!workflowRuns.length) {
