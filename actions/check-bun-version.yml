@@ -1,0 +1,10 @@
+jobs:
+  setup-bun:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup bun
+        uses: actions/setup-bun@f4d14e03ff726c06358e5557344e1da148b56cf7
+        with:
+          bun-download-url: "https://github.com/oven-sh/bun/releases/latest/download/bun-${{runner.os == 'macOS' && 'darwin' || runner.os}}-${{ runner.arch == 'X64' && 'x64' || 'arm64' }}.zip"
+      - name: Check Bun version
+        run: bun --version
