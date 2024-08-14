@@ -6,7 +6,7 @@
 import { Octokit } from "@octokit/rest";
 import { $ } from "bun";
 import { realpathSync, readdirSync, symlinkSync } from "fs";
-import { dirname } from "path";
+import { dirname, sep } from "path";
 
 $.throws(true);
 const cwd = realpathSync(import.meta.dir);
@@ -370,11 +370,10 @@ for await (const artifact of await getBuildArtifactUrls(prData.statuses_url)) {
     throw new Error(`Failed to download artifact: ${response.statusText}`);
   }
   console.log(
-    "Downloading '",
-    ARTIFACT_NAME,
-    "' from PR #" + PR_ID,
-    "-",
-    artifact.url
+    "Downloading",
+    JSON.stringify(ARTIFACT_NAME),
+    "from PR #" + PR_ID,
+    "\n-> " + artifact.url + "\n"
   );
   const blob = await response.blob();
   const filename = `${ARTIFACT_NAME}-pr-${PR_ID}-${artifact.shasum}.zip`;
@@ -409,7 +408,7 @@ for await (const artifact of await getBuildArtifactUrls(prData.statuses_url)) {
     );
     console.write(
       "Downloaded to:" + "\n\n",
-      `\x1b[1m\x1b[32m${OUT_DIR}/${fullName}\x1b[0m` + "\n\n",
+      `\x1b[1m\x1b[32m${OUT_DIR}${sep}${fullName}\x1b[0m` + "\n\n",
       `To run the downloaded executable, use any of the following following commands:` +
         "\n\n",
       `\x1b[1m\x1b[32m${fullName.replaceAll(".exe", "")}${extension}\x1b[0m\n`,
