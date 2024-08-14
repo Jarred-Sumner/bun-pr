@@ -1,5 +1,8 @@
 #!/usr/bin/env bun
 
+// This uses the BuildKite browser-facing API instead of the public API.
+// To avoid asking for credentials.
+
 import { Octokit } from "@octokit/rest";
 import { $ } from "bun";
 import { realpathSync, readdirSync, symlinkSync } from "fs";
@@ -14,11 +17,216 @@ const GITHUB_TOKEN =
   process.env.GITHUB_TOKEN || (await $`gh auth token`.text()).trim(); // Replace with your GitHub token
 const REPO_OWNER = process.env.BUN_REPO_OWNER || "oven-sh"; // Replace with the repository owner
 const REPO_NAME = process.env.BUN_REPO_NAME || "bun"; // Replace with the repository name
+type BuildkiteBuild = {
+  id: string;
+  graphql_id: string;
+  url: string;
+  web_url: string;
+  number: number;
+  state: string;
+  cancel_reason: string | null;
+  blocked: boolean;
+  message: string;
+  commit: string;
+  branch: string;
+  env: Record<string, any>;
+  source: string;
+  creator: Creator;
+  jobs: Job[];
+  created_at: string;
+  scheduled_at: string;
+  started_at: string;
+  finished_at: string;
+  meta_data: Record<string, any>;
+  pull_request: Record<string, any>;
+  rebuilt_from: RebuiltFrom | null;
+  pipeline: Pipeline;
+};
 
-const octokit = new Octokit({
-  auth: GITHUB_TOKEN,
-});
+type Job = {
+  id: string;
+  graphql_id: string;
+  type: string;
+  name: string;
+  step_key: string;
+  step: {
+    id: string;
+    signature: {
+      value: string;
+      algorithm: string;
+      signed_fields: string[];
+    };
+  };
+  agent_query_rules: string[];
+  state: string;
+  web_url: string;
+  log_url: string;
+  raw_log_url: string;
+  command: string;
+  soft_failed: boolean;
+  exit_status: number;
+  artifact_paths: string;
+  agent: Agent;
+  created_at: string;
+  scheduled_at: string;
+  runnable_at: string;
+  started_at: string;
+  finished_at: string;
+  retried: boolean;
+  retried_in_job_id: string | null;
+  retries_count: number | null;
+  retry_type: string | null;
+  parallel_group_index: number | null;
+  parallel_group_total: number | null;
+  matrix: Record<string, any> | null;
+  cluster_id: string | null;
+  cluster_url: string | null;
+  cluster_queue_id: string | null;
+  cluster_queue_url: string | null;
+};
 
+type Agent = {
+  id: string;
+  graphql_id: string;
+  url: string;
+  web_url: string;
+  name: string;
+  connection_state: string;
+  hostname: string;
+  ip_address: string;
+  user_agent: string;
+  creator: Creator;
+  created_at: string;
+};
+
+type Creator = {
+  id: string;
+  name: string;
+  email: string;
+  avatar_url: string;
+  created_at: string;
+};
+
+type RebuiltFrom = {
+  id: string;
+  number: number;
+  url: string;
+};
+
+type Pipeline = {
+  id: string;
+  graphql_id: string;
+  url: string;
+  name: string;
+  slug: string;
+  repository: string;
+  provider: {
+    id: string;
+    webhook_url: string;
+  };
+  skip_queued_branch_builds: boolean;
+  skip_queued_branch_builds_filter: string | null;
+  cancel_running_branch_builds: boolean;
+  cancel_running_branch_builds_filter: string | null;
+  builds_url: string;
+  badge_url: string;
+  created_at: string;
+  scheduled_builds_count: number;
+  running_builds_count: number;
+  scheduled_jobs_count: number;
+  running_jobs_count: number;
+  waiting_jobs_count: number;
+};
+
+async function getBuildkitePipelineUrl(buildkiteUrl: string): Promise<string> {
+  const statusesResponse = await fetch(buildkiteUrl);
+  if (!statusesResponse.ok) {
+    throw new Error(`Failed to fetch statuses: ${statusesResponse.statusText}`);
+  }
+
+  const statuses = await statusesResponse.json();
+  const buildkiteStatus = statuses.find(
+    (status: any) => status.context === "buildkite/bun"
+  );
+  if (!buildkiteStatus) {
+    throw new Error(
+      "No BuildKite build found for this PR" +
+        "\n" +
+        statuses.map((status: any) => status.context).join("\n---\n")
+    );
+  }
+
+  return buildkiteStatus.target_url;
+}
+
+async function* getBuildArtifacts(buildkiteUrl: string) {
+  const buildkiteID = buildkiteUrl.split("/").at(-1);
+  const pipelineUrl = `https://buildkite.com/bun/bun/builds/${buildkiteID}.json`;
+  const response = await fetch(pipelineUrl);
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch BuildKite builds: ${response.statusText}`);
+  }
+
+  const result: BuildkiteBuild = (await response.json()) as BuildkiteBuild;
+  const jobs = result.jobs.filter((job) =>
+    job.step_key?.includes?.("build-bun")
+  );
+
+  if (!jobs.length) {
+    throw new Error("No successful build found");
+  }
+
+  for (const build of jobs) {
+    const artifactsResponse = await fetch(
+      new URL(build.base_path, "https://buildkite.com").href + "/artifacts"
+    );
+
+    if (!artifactsResponse.ok) {
+      throw new Error(
+        `Failed to fetch artifacts: ${artifactsResponse.statusText}`
+      );
+    }
+
+    const artifacts = await artifactsResponse.json();
+
+    // id: "01914e67-1a28-4812-bea7-78321eb1cc5d",
+    // state: "finished",
+    // path: "bun-darwin-x64.zip",
+    // url: "/organizations/bun/pipelines/bun/builds/1771/jobs/01914e5f-50c8-4b95-9546-56a2ab0c3e0d/artifacts/01914e67-1a28-4812-bea7-78321eb1cc5d",
+    // self_hosted: false,
+    // expires_at: "2025-02-10T01:01:05.000Z",
+    // can_delete_artifact: {
+    // allowed: true,
+    // reason: null,
+    // message: null
+    // },
+    // mime_type: "application/zip",
+    // file_name: "bun-darwin-x64.zip",
+    // file_size: "18.9 MB",
+    // sha1sum: "7fdd94c18cfea3189ae22c14e37675d80092c085",
+    // sha256sum: "3cc2cb08be689f68c7b26941477c13783e18d8ba73c088b6d14248d8e742713d"
+    // },
+    const createdAt = new Date(build.created_at);
+    const finishedAt = new Date(build.finished_at);
+
+    yield* artifacts
+      .filter((artifact) => artifact.file_name.includes(".zip"))
+      .map((artifact: any) => ({
+        url: new URL(artifact.url, "https://buildkite.com").href,
+        filename: artifact.file_name,
+        name: artifact.file_name.replace(".zip", ""),
+        createdAt: createdAt,
+        elapsed: finishedAt.getTime() - createdAt.getTime(),
+        shasum: artifact.sha1sum,
+      }));
+  }
+}
+
+export async function getBuildArtifactUrls(githubPRUrl: string) {
+  const buildkiteUrl = await getBuildkitePipelineUrl(githubPRUrl);
+  return await getBuildArtifacts(buildkiteUrl);
+}
 const IS_PROFILE = (() => {
   const profileIndex = process.argv.findIndex((a) => a === "--profile");
   if (profileIndex !== -1) {
@@ -38,6 +246,10 @@ const IS_BASELINE = (() => {
     return false;
   }
 })();
+
+const octokit = new Octokit({
+  auth: GITHUB_TOKEN,
+});
 
 const ARTIFACT_NAME = (() => {
   let basename = "bun-";
@@ -139,68 +351,8 @@ const { data: prData } = await octokit.pulls.get({
   pull_number: Number(PR_ID),
 });
 
-const headSha = prData.head.sha;
-
-// List workflow runs for the repo and find the latest successful run for the PR's commit SHA
-const [
-  {
-    data: { workflow_runs: completedRunsData = [] },
-  },
-  {
-    data: { workflow_runs: inProgressRunsData = [] },
-  },
-] = await Promise.all([
-  octokit.actions.listWorkflowRunsForRepo({
-    owner: REPO_OWNER,
-    repo: REPO_NAME,
-    event: "pull_request",
-    status: "completed",
-    branch: prData.head.ref, // Filter by branch associated with the PR
-    per_page: 100, // Fetch up to 100 workflow runs
-  }),
-  octokit.actions.listWorkflowRunsForRepo({
-    owner: REPO_OWNER,
-    repo: REPO_NAME,
-    event: "pull_request",
-    status: "in_progress",
-    branch: prData.head.ref, // Filter by branch associated with the PR
-    per_page: 100, // Fetch up to 100 workflow runs
-  }),
-]);
-const runsData = [...completedRunsData, ...inProgressRunsData];
-function isPossibleRun(name) {
-  name = name.toLowerCase();
-
-  return (
-    name.includes("ci") ||
-    name.includes("macos") ||
-    name.includes("linux") ||
-    name.includes("windows") ||
-    name.includes("darwin")
-  );
-}
-const workflowRuns = runsData
-  .filter((run) => isPossibleRun(run.name!) && run.run_started_at)
-  .sort((a, b) => b.run_started_at!.localeCompare(a.run_started_at!));
-
-if (!workflowRuns.length) {
-  console.log("No successful workflow run found for this PR.");
-  process.exit(1);
-}
-
-for (const workflowRun of workflowRuns) {
-  // List artifacts for the identified workflow run
-  const { data: artifactsData } =
-    await octokit.actions.listWorkflowRunArtifacts({
-      owner: REPO_OWNER,
-      repo: REPO_NAME,
-      run_id: workflowRun.id,
-    });
-  const artifact = artifactsData.artifacts.find((artifact) =>
-    isArtifactName(artifact.name)
-  );
-
-  if (!artifact) {
+for await (const artifact of await getBuildArtifactUrls(prData.statuses_url)) {
+  if (!isArtifactName(artifact.name)) {
     continue;
   }
 
@@ -210,49 +362,39 @@ for (const workflowRun of workflowRuns) {
       timeStyle: "medium",
       dateStyle: "medium",
       formatMatcher: "best fit",
-    }).format(new Date(workflowRun.run_started_at!))
+    }).format(artifact.createdAt)
   );
 
-  // Download the artifact
-  const artifactResponse = await octokit.actions.downloadArtifact({
-    owner: REPO_OWNER,
-    repo: REPO_NAME,
-    artifact_id: artifact.id,
-    archive_format: "zip", // GitHub artifacts are zipped
-  });
-
-  const downloadUrl = artifactResponse.url;
-
-  const response = await fetch(downloadUrl);
-
+  const response = await fetch(artifact.url);
   if (!response.ok) {
     throw new Error(`Failed to download artifact: ${response.statusText}`);
   }
   console.log(
-    "Downloading",
+    "Downloading '",
     ARTIFACT_NAME,
-    "from PR #" + PR_ID,
+    "' from PR #" + PR_ID,
     "-",
-    workflowRun.html_url
+    artifact.url
   );
   const blob = await response.blob();
-  const filename = `${ARTIFACT_NAME}-pr-${PR_ID}-${workflowRun.id}.zip`;
-  const dest = `bun-${PR_ID}-${workflowRun.head_sha}`;
-
+  const filename = `${ARTIFACT_NAME}-pr-${PR_ID}-${artifact.shasum}.zip`;
+  const dest = `bun-${PR_ID}-${prData.head.sha}`;
   await $`rm -rf ${ARTIFACT_NAME} ${dest} ${ARTIFACT_NAME}.zip ${ARTIFACT_NAME}-artifact.zip ${filename}`;
   await Bun.write(filename, blob);
   await $`unzip ${filename} && rm -rf ${filename}`.quiet();
-  await $`unzip ${ARTIFACT_NAME}.zip && rm -rf ${ARTIFACT_NAME}.zip`.quiet();
-  await $`mv ${ARTIFACT_NAME} ${dest}`;
-
+  await $`cp -r ${ARTIFACT_NAME} ${dest}`;
   const files = readdirSync(`./${dest}`);
   const inFolder =
     files.find((f) => f === "bun" || f === "bun.exe") ||
     files.find((f) => f === "bun-profile" || f === "bun-profile.exe");
-
   if (inFolder) {
-    const fullName = `${inFolder}-${workflowRun.head_sha}-pr${PR_ID}`;
-    await $`mv ${dest}/${inFolder} ${OUT_DIR}/${fullName} && rm -rf ${dest} ${OUT_DIR}/${inFolder}-${PR_ID} ${OUT_DIR}/${inFolder}-latest`.quiet();
+    let fullName = `${inFolder}-${prData.head.sha}-pr${PR_ID}`;
+    if (process.platform === "win32") {
+      fullName = fullName.replaceAll(".exe", "");
+      fullName += ".exe";
+    }
+
+    await $`cp ${dest}/${inFolder} ${OUT_DIR}/${fullName} && rm -rf ${dest} ${OUT_DIR}/${inFolder}-${PR_ID} ${OUT_DIR}/${inFolder}-latest`.quiet();
     symlinkSync(
       `${OUT_DIR}/${fullName}`,
       `${OUT_DIR}/${inFolder}-${PR_ID}`,
