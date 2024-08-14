@@ -382,27 +382,29 @@ for await (const artifact of await getBuildArtifactUrls(prData.statuses_url)) {
   await $`rm -rf ${ARTIFACT_NAME} ${dest} ${ARTIFACT_NAME}.zip ${ARTIFACT_NAME}-artifact.zip ${filename}`;
   await Bun.write(filename, blob);
   await $`unzip ${filename} && rm -rf ${filename}`.quiet();
-  await $`cp -r ${ARTIFACT_NAME} ${dest}`;
+  await $`cp -R ${ARTIFACT_NAME} ${dest}`;
   const files = readdirSync(`./${dest}`);
   const inFolder =
     files.find((f) => f === "bun" || f === "bun.exe") ||
     files.find((f) => f === "bun-profile" || f === "bun-profile.exe");
   if (inFolder) {
-    let fullName = `${inFolder}-${prData.head.sha}-pr${PR_ID}`;
+    const inFolderWithoutExtension = inFolder.replaceAll(".exe", "");
+    let extension = "";
     if (process.platform === "win32") {
-      fullName = fullName.replaceAll(".exe", "");
-      fullName += ".exe";
+      extension = ".exe";
     }
 
-    await $`cp ${dest}/${inFolder} ${OUT_DIR}/${fullName} && rm -rf ${dest} ${OUT_DIR}/${inFolder}-${PR_ID} ${OUT_DIR}/${inFolder}-latest`.quiet();
+    let fullName = `${inFolderWithoutExtension}-${prData.head.sha}-pr${PR_ID}${extension}`;
+
+    await $`cp ${dest}/${inFolder} ${OUT_DIR}/${fullName} && rm -rf ${dest} ${OUT_DIR}/${inFolderWithoutExtension}-${PR_ID}${extension} ${OUT_DIR}/${inFolderWithoutExtension}-latest${extension}`.quiet();
     symlinkSync(
       `${OUT_DIR}/${fullName}`,
-      `${OUT_DIR}/${inFolder}-${PR_ID}`,
+      `${OUT_DIR}/${inFolderWithoutExtension}-${PR_ID}${extension}`,
       "file"
     );
     symlinkSync(
       `${OUT_DIR}/${fullName}`,
-      `${OUT_DIR}/${inFolder}-latest`,
+      `${OUT_DIR}/${inFolderWithoutExtension}-latest${extension}`,
       "file"
     );
     console.write(
@@ -410,9 +412,9 @@ for await (const artifact of await getBuildArtifactUrls(prData.statuses_url)) {
       `\x1b[1m\x1b[32m${OUT_DIR}/${fullName}\x1b[0m` + "\n\n",
       `To run the downloaded executable, use any of the following following commands:` +
         "\n\n",
-      `\x1b[1m\x1b[32m${fullName}\x1b[0m\n`,
-      `\x1b[1m\x1b[32m${inFolder}-${PR_ID}\x1b[0m\n`,
-      `\x1b[1m\x1b[32m${inFolder}-latest\x1b[0m\n`
+      `\x1b[1m\x1b[32m${fullName.replaceAll(".exe", "")}${extension}\x1b[0m\n`,
+      `\x1b[1m\x1b[32m${inFolderWithoutExtension}-${PR_ID}${extension}\x1b[0m\n`,
+      `\x1b[1m\x1b[32m${inFolderWithoutExtension}-latest${extension}\x1b[0m\n`
     );
   } else {
     console.log("No executable found in the artifact folder.", files);
