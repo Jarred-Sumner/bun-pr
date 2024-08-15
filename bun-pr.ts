@@ -138,25 +138,49 @@ type Pipeline = {
   waiting_jobs_count: number;
 };
 
-async function getBuildkitePipelineUrl(buildkiteUrl: string): Promise<string> {
-  const statusesResponse = await fetch(buildkiteUrl);
+async function* getBuildkitePipelineUrl(buildkiteUrl: string): Promise<string> {
+  const statusesResponse = await fetch(buildkiteUrl + "?per_page=100", {
+    headers: {
+      Accept: "application/vnd.github.v3+json",
+      Authorization: `token ${GITHUB_TOKEN}`,
+    },
+  });
   if (!statusesResponse.ok) {
     throw new Error(`Failed to fetch statuses: ${statusesResponse.statusText}`);
   }
 
-  const statuses = await statusesResponse.json();
-  const buildkiteStatus = statuses.find(
-    (status: any) => status.context === "buildkite/bun"
-  );
-  if (!buildkiteStatus) {
-    throw new Error(
-      "No BuildKite build found for this PR" +
-        "\n" +
-        statuses.map((status: any) => status.context).join("\n---\n")
-    );
-  }
+  let statuses = await statusesResponse.json();
+  yield* statuses
+    .filter((status: any) => status.context === "buildkite/bun")
+    .map((status: any) => status.target_url);
 
-  return buildkiteStatus.target_url;
+  let page = 1;
+  while (true) {
+    const nextResponse = await fetch(
+      buildkiteUrl + "?per_page=100&page=" + page++,
+      {
+        headers: {
+          Accept: "application/vnd.github.v3+json",
+          Authorization: `token ${GITHUB_TOKEN}`,
+        },
+      }
+    );
+    if (!nextResponse.ok) {
+      break;
+    }
+
+    if (!nextResponse.headers.get("Link")) {
+      break;
+    }
+
+    const json = await nextResponse.json();
+    if (!json.length) {
+      break;
+    }
+    yield* json
+      .filter((status: any) => status.context === "buildkite/bun")
+      .map((status: any) => status.target_url);
+  }
 }
 
 async function* getBuildArtifacts(buildkiteUrl: string) {
@@ -223,10 +247,12 @@ async function* getBuildArtifacts(buildkiteUrl: string) {
   }
 }
 
-export async function getBuildArtifactUrls(githubPRUrl: string) {
-  const buildkiteUrl = await getBuildkitePipelineUrl(githubPRUrl);
-  return await getBuildArtifacts(buildkiteUrl);
+export async function* getBuildArtifactUrls(githubPRUrl: string) {
+  for await (let url of getBuildkitePipelineUrl(githubPRUrl)) {
+    yield* getBuildArtifacts(url);
+  }
 }
+
 const IS_PROFILE = (() => {
   const profileIndex = process.argv.findIndex((a) => a === "--profile");
   if (profileIndex !== -1) {
