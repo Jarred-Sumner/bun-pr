@@ -138,7 +138,7 @@ type Pipeline = {
   waiting_jobs_count: number;
 };
 
-async function* getBuildkitePipelineUrl(buildkiteUrl: string): Promise<string> {
+async function* getBuildkitePipelineUrl(buildkiteUrl: string) {
   const statusesResponse = await fetch(buildkiteUrl + "?per_page=100", {
     headers: {
       Accept: "application/vnd.github.v3+json",
@@ -149,7 +149,7 @@ async function* getBuildkitePipelineUrl(buildkiteUrl: string): Promise<string> {
     throw new Error(`Failed to fetch statuses: ${statusesResponse.statusText}`);
   }
 
-  let statuses = await statusesResponse.json();
+  const statuses = await statusesResponse.json();
   yield* statuses
     .filter((status: any) => status.context === "buildkite/bun")
     .map((status: any) => status.target_url);
@@ -189,7 +189,10 @@ async function* getBuildArtifacts(buildkiteUrl: string) {
   const response = await fetch(pipelineUrl);
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch BuildKite builds: ${response.statusText}`);
+    return {
+      fail: true,
+      error: `Failed to fetch BuildKite builds: ${response.statusText}`,
+    };
   }
 
   const result: BuildkiteBuild = (await response.json()) as BuildkiteBuild;
@@ -198,7 +201,10 @@ async function* getBuildArtifacts(buildkiteUrl: string) {
   );
 
   if (!jobs.length) {
-    throw new Error("No successful build found");
+    return {
+      fail: true,
+      error: "No successful build found",
+    };
   }
 
   for (const build of jobs) {
@@ -207,9 +213,10 @@ async function* getBuildArtifacts(buildkiteUrl: string) {
     );
 
     if (!artifactsResponse.ok) {
-      throw new Error(
-        `Failed to fetch artifacts: ${artifactsResponse.statusText}`
-      );
+      return {
+        fail: true,
+        error: `Failed to fetch artifacts: ${artifactsResponse.statusText}`,
+      };
     }
 
     const artifacts = await artifactsResponse.json();
@@ -249,7 +256,15 @@ async function* getBuildArtifacts(buildkiteUrl: string) {
 
 export async function* getBuildArtifactUrls(githubPRUrl: string) {
   for await (let url of getBuildkitePipelineUrl(githubPRUrl)) {
-    yield* getBuildArtifacts(url);
+    const iter = getBuildArtifacts(url);
+    while (true) {
+      const result = await iter.next();
+      if (!result?.value) {
+        break;
+      }
+
+      yield result.value;
+    }
   }
 }
 
@@ -318,19 +333,40 @@ function isArtifactName(name) {
   return false;
 }
 
-const PR_ID = await (async () => {
+// Add this new function to fetch commit details
+async function getCommitDetails(sha: string) {
+  const { data: commitData } = await octokit.repos.getCommit({
+    owner: REPO_OWNER,
+    repo: REPO_NAME,
+    ref: sha,
+  });
+  return commitData;
+}
+
+// Modify the PR_ID logic to handle commit hashes
+const PR_OR_COMMIT = await (async () => {
   let last = process.argv.at(-1);
 
   if (last?.startsWith("https://github.com")) {
-    return new URL(last).pathname.split("/").at(-1);
+    const parts = new URL(last).pathname.split("/");
+    return parts[parts.length - 2] === "commit"
+      ? { type: "commit", value: parts.at(-1) }
+      : { type: "pr", value: parts.at(-1) };
   } else if (last?.startsWith("https://api.github.com")) {
-    return new URL(last).pathname.split("/").at(-1);
+    const parts = new URL(last).pathname.split("/");
+    return parts[parts.length - 2] === "commits"
+      ? { type: "commit", value: parts.at(-1) }
+      : { type: "pr", value: parts.at(-1) };
   } else if (last?.startsWith("#")) {
-    return last.slice(1);
+    return { type: "pr", value: last.slice(1) };
   } else if (Number(last) === Number(last)) {
-    return last;
+    return { type: "pr", value: last };
+  }
+  // long git sha or short git sha
+  else if (last?.match(/^[0-9a-f]{40}$/) || last?.match(/^[0-9a-f]{7,}$/)) {
+    return { type: "commit", value: last };
   } else {
-    // resolve branch name to PR number from argv
+    // resolve branch name to PR number or latest commit from argv
     const branch = last;
     let { data: prs = [] } = await octokit.pulls.list({
       owner: REPO_OWNER,
@@ -340,23 +376,32 @@ const PR_ID = await (async () => {
     });
 
     if (prs.length) {
-      return prs[0].number;
+      return { type: "pr", value: prs[0].number.toString() };
     } else {
-      ({ data: prs = [] } = await octokit.pulls.list({
+      const { data: commits } = await octokit.repos.listCommits({
         owner: REPO_OWNER,
         repo: REPO_NAME,
-        state: "closed",
-        head: `${REPO_OWNER}:${branch}`,
-      }));
+        sha: branch,
+        per_page: 1,
+      });
 
-      if (prs.length) {
-        return prs[0].number;
+      if (commits.length) {
+        return { type: "commit", value: commits[0].sha };
       }
 
-      throw new Error(`No open PR found for branch ${branch}`);
+      throw new Error(`No open PR or recent commit found for branch ${branch}`);
     }
   }
 })();
+
+// Update console log to show whether we're searching for a PR or commit
+console.log(
+  "Searching GitHub for artifact",
+  ARTIFACT_NAME,
+  `from ${PR_OR_COMMIT.type === "pr" ? "PR #" : "commit"} ${
+    PR_OR_COMMIT.value
+  }...`
+);
 
 const OUT_DIR =
   process.env.BUN_OUT_DIR ||
@@ -364,20 +409,26 @@ const OUT_DIR =
     ? dirname(Bun.which("bun"))
     : process.env.BUN_INSTALL || ".");
 
-console.log(
-  "Searching GitHub for artifact",
-  ARTIFACT_NAME,
-  "from PR #" + PR_ID + "..."
-);
+// Modify the main download loop
+let prData, commitData;
+if (PR_OR_COMMIT.type === "pr") {
+  // Get PR details to find the head commit SHA
+  ({ data: prData } = await octokit.pulls.get({
+    owner: REPO_OWNER,
+    repo: REPO_NAME,
+    pull_number: Number(PR_OR_COMMIT.value),
+  }));
+} else {
+  // Get commit details
+  commitData = await getCommitDetails(PR_OR_COMMIT.value);
+}
 
-// Get PR details to find the head commit SHA
-const { data: prData } = await octokit.pulls.get({
-  owner: REPO_OWNER,
-  repo: REPO_NAME,
-  pull_number: Number(PR_ID),
-});
+const statusesUrl =
+  PR_OR_COMMIT.type === "pr"
+    ? prData.statuses_url
+    : commitData.url + "/statuses";
 
-for await (const artifact of await getBuildArtifactUrls(prData.statuses_url)) {
+for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
   if (!isArtifactName(artifact.name)) {
     continue;
   }
@@ -398,12 +449,16 @@ for await (const artifact of await getBuildArtifactUrls(prData.statuses_url)) {
   console.log(
     "Downloading",
     JSON.stringify(ARTIFACT_NAME),
-    "from PR #" + PR_ID,
+    `from ${PR_OR_COMMIT.type === "pr" ? "PR #" : "commit"} ${
+      PR_OR_COMMIT.value
+    }`,
     "\n-> " + artifact.url + "\n"
   );
   const blob = await response.blob();
-  const filename = `${ARTIFACT_NAME}-pr-${PR_ID}-${artifact.shasum}.zip`;
-  const dest = `bun-${PR_ID}-${prData.head.sha}`;
+  const filename = `${ARTIFACT_NAME}-${PR_OR_COMMIT.type}-${PR_OR_COMMIT.value}-${artifact.shasum}.zip`;
+  const dest = `bun-${PR_OR_COMMIT.value}-${
+    PR_OR_COMMIT.type === "pr" ? prData.head.sha : commitData.sha
+  }`;
   await $`rm -rf ${ARTIFACT_NAME} ${dest} ${ARTIFACT_NAME}.zip ${ARTIFACT_NAME}-artifact.zip ${filename}`;
   await Bun.write(filename, blob);
   await $`unzip ${filename} && rm -rf ${filename}`.quiet();
@@ -419,12 +474,14 @@ for await (const artifact of await getBuildArtifactUrls(prData.statuses_url)) {
       extension = ".exe";
     }
 
-    let fullName = `${inFolderWithoutExtension}-${prData.head.sha}-pr${PR_ID}${extension}`;
+    let fullName = `${inFolderWithoutExtension}-${
+      PR_OR_COMMIT.type === "pr" ? prData.head.sha : commitData.sha
+    }-${PR_OR_COMMIT.type}${PR_OR_COMMIT.value}${extension}`;
 
-    await $`cp ${dest}/${inFolder} ${OUT_DIR}/${fullName} && rm -rf ${dest} ${OUT_DIR}/${inFolderWithoutExtension}-${PR_ID}${extension} ${OUT_DIR}/${inFolderWithoutExtension}-latest${extension}`.quiet();
+    await $`cp ${dest}/${inFolder} ${OUT_DIR}/${fullName} && rm -rf ${dest} ${OUT_DIR}/${inFolderWithoutExtension}-${PR_OR_COMMIT.value}${extension} ${OUT_DIR}/${inFolderWithoutExtension}-latest${extension}`.quiet();
     symlinkSync(
       `${OUT_DIR}/${fullName}`,
-      `${OUT_DIR}/${inFolderWithoutExtension}-${PR_ID}${extension}`,
+      `${OUT_DIR}/${inFolderWithoutExtension}-${PR_OR_COMMIT.value}${extension}`,
       "file"
     );
     symlinkSync(
@@ -438,7 +495,7 @@ for await (const artifact of await getBuildArtifactUrls(prData.statuses_url)) {
       `To run the downloaded executable, use any of the following following commands:` +
         "\n\n",
       `\x1b[1m\x1b[32m${fullName.replaceAll(".exe", "")}${extension}\x1b[0m\n`,
-      `\x1b[1m\x1b[32m${inFolderWithoutExtension}-${PR_ID}${extension}\x1b[0m\n`,
+      `\x1b[1m\x1b[32m${inFolderWithoutExtension}-${PR_OR_COMMIT.value}${extension}\x1b[0m\n`,
       `\x1b[1m\x1b[32m${inFolderWithoutExtension}-latest${extension}\x1b[0m\n`
     );
   } else {
@@ -447,5 +504,7 @@ for await (const artifact of await getBuildArtifactUrls(prData.statuses_url)) {
   process.exit(0);
 }
 
-console.log(`Artifact named ${ARTIFACT_NAME} not found.`);
+console.log(
+  `Artifact named ${ARTIFACT_NAME} not found for ${PR_OR_COMMIT.type} ${PR_OR_COMMIT.value}.`
+);
 process.exit(1);
