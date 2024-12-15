@@ -13,8 +13,12 @@ const cwd = realpathSync(import.meta.dir);
 $.cwd(cwd);
 process.chdir(cwd);
 
-const GITHUB_TOKEN =
-  process.env.GITHUB_TOKEN || (await $`gh auth token`.text()).trim(); // Replace with your GitHub token
+let GITHUB_TOKEN = "";
+try {
+  GITHUB_TOKEN =
+    process.env.GITHUB_TOKEN || (await $`gh auth token`.text()).trim(); // Replace with your GitHub token
+} catch (e) {}
+
 const REPO_OWNER = process.env.BUN_REPO_OWNER || "oven-sh"; // Replace with the repository owner
 const REPO_NAME = process.env.BUN_REPO_NAME || "bun"; // Replace with the repository name
 type BuildkiteBuild = {
@@ -142,7 +146,7 @@ async function* getBuildkitePipelineUrl(buildkiteUrl: string) {
   const statusesResponse = await fetch(buildkiteUrl + "?per_page=100", {
     headers: {
       Accept: "application/vnd.github.v3+json",
-      Authorization: `token ${GITHUB_TOKEN}`,
+      Authorization: GITHUB_TOKEN ? `token ${GITHUB_TOKEN}` : undefined,
     },
   });
   if (!statusesResponse.ok) {
@@ -161,7 +165,7 @@ async function* getBuildkitePipelineUrl(buildkiteUrl: string) {
       {
         headers: {
           Accept: "application/vnd.github.v3+json",
-          Authorization: `token ${GITHUB_TOKEN}`,
+          Authorization: GITHUB_TOKEN ? `token ${GITHUB_TOKEN}` : undefined,
         },
       }
     );
@@ -430,9 +434,13 @@ const statusesUrl =
 
 for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
   if (!isArtifactName(artifact.name)) {
+    if (process.env.DEBUG) {
+      console.debug("Skipping artifact", artifact.name);
+    }
+
     continue;
   }
-
+  console.log("Found artifact", artifact.name);
   console.log(
     "Choosing artifact from run that started",
     new Intl.DateTimeFormat(undefined, {
