@@ -53,16 +53,8 @@ type Job = {
   type: string;
   name: string;
   step_key: string;
-  step: {
-    id: string;
-    signature: {
-      value: string;
-      algorithm: string;
-      signed_fields: string[];
-    };
-  };
-  agent_query_rules: string[];
   state: string;
+  base_path: string;
   web_url: string;
   log_url: string;
   raw_log_url: string;
@@ -143,131 +135,181 @@ type Pipeline = {
 };
 
 async function* getBuildkitePipelineUrl(buildkiteUrl: string) {
+  const headers = {
+    Accept: "application/vnd.github.v3+json",
+    ...(GITHUB_TOKEN ? { Authorization: `token ${GITHUB_TOKEN}` } : {}),
+  };
+
   const statusesResponse = await fetch(buildkiteUrl + "?per_page=100", {
-    headers: {
-      Accept: "application/vnd.github.v3+json",
-      Authorization: GITHUB_TOKEN ? `token ${GITHUB_TOKEN}` : undefined,
-    },
+    headers,
   });
   if (!statusesResponse.ok) {
     throw new Error(`Failed to fetch statuses: ${statusesResponse.statusText}`);
   }
 
-  const statuses = await statusesResponse.json();
+  const statuses = (await statusesResponse.json()) as Array<{
+    context: string;
+    target_url: string;
+  }>;
   yield* statuses
-    .filter((status: any) => status.context === "buildkite/bun")
-    .map((status: any) => status.target_url);
+    .filter((status) => status.context === "buildkite/bun")
+    .map((status) => status.target_url);
+}
 
-  let page = 1;
-  while (true) {
-    const nextResponse = await fetch(
-      buildkiteUrl + "?per_page=100&page=" + page++,
-      {
-        headers: {
-          Accept: "application/vnd.github.v3+json",
-          Authorization: GITHUB_TOKEN ? `token ${GITHUB_TOKEN}` : undefined,
-        },
+async function* getPRCommits(prNumber: number) {
+  const { data: commits } = await octokit.pulls.listCommits({
+    owner: REPO_OWNER,
+    repo: REPO_NAME,
+    pull_number: prNumber,
+    per_page: 100,
+  });
+
+  // Start with newest commits
+  for (const commit of commits) {
+    const { data: statuses } = await octokit.repos.listCommitStatusesForRef({
+      owner: REPO_OWNER,
+      repo: REPO_NAME,
+      ref: commit.sha,
+    });
+
+    const buildkiteStatuses = statuses
+      .filter((status) => status.context === "buildkite/bun")
+      .sort(
+        (a, b) =>
+          new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      );
+
+    for (const status of buildkiteStatuses) {
+      if (status.target_url) {
+        yield status.target_url;
       }
-    );
-    if (!nextResponse.ok) {
-      break;
     }
-
-    if (!nextResponse.headers.get("Link")) {
-      break;
-    }
-
-    const json = await nextResponse.json();
-    if (!json.length) {
-      break;
-    }
-    yield* json
-      .filter((status: any) => status.context === "buildkite/bun")
-      .map((status: any) => status.target_url);
   }
 }
 
 async function* getBuildArtifacts(buildkiteUrl: string) {
   const buildkiteID = buildkiteUrl.split("/").at(-1);
+  if (!buildkiteID) {
+    console.debug("Invalid buildkite URL");
+    return;
+  }
+
   const pipelineUrl = `https://buildkite.com/bun/bun/builds/${buildkiteID}.json`;
   const response = await fetch(pipelineUrl);
 
   if (!response.ok) {
-    return {
-      fail: true,
-      error: `Failed to fetch BuildKite builds: ${response.statusText}`,
-    };
+    console.debug(
+      `Build ${buildkiteID} not accessible: ${response.statusText}`
+    );
+    return;
   }
 
   const result: BuildkiteBuild = (await response.json()) as BuildkiteBuild;
+
+  // Skip builds that aren't finished yet
+  if (
+    result.state !== "passed" &&
+    result.state !== "failed" &&
+    result.state !== "finished"
+  ) {
+    console.debug(
+      `Build ${buildkiteID} is in state: ${result.state}, ignoring...`
+    );
+    return;
+  }
+
   const jobs = result.jobs.filter((job) =>
     job.step_key?.includes?.("build-bun")
   );
 
   if (!jobs.length) {
-    return {
-      fail: true,
-      error: "No successful build found",
-    };
+    console.debug(`Build ${buildkiteID} has no build-bun jobs`);
+    return;
   }
 
   for (const build of jobs) {
-    const artifactsResponse = await fetch(
-      new URL(build.base_path, "https://buildkite.com").href + "/artifacts"
-    );
-
-    if (!artifactsResponse.ok) {
-      return {
-        fail: true,
-        error: `Failed to fetch artifacts: ${artifactsResponse.statusText}`,
-      };
+    if (!build.base_path) {
+      console.debug(`Build ${buildkiteID} job ${build.id} has no base path`);
+      continue;
     }
 
-    const artifacts = await artifactsResponse.json();
+    try {
+      const artifactsUrl = new URL(build.base_path, "https://buildkite.com");
+      const artifactsPath = artifactsUrl.pathname + "/artifacts";
+      artifactsUrl.pathname = artifactsPath;
 
-    // id: "01914e67-1a28-4812-bea7-78321eb1cc5d",
-    // state: "finished",
-    // path: "bun-darwin-x64.zip",
-    // url: "/organizations/bun/pipelines/bun/builds/1771/jobs/01914e5f-50c8-4b95-9546-56a2ab0c3e0d/artifacts/01914e67-1a28-4812-bea7-78321eb1cc5d",
-    // self_hosted: false,
-    // expires_at: "2025-02-10T01:01:05.000Z",
-    // can_delete_artifact: {
-    // allowed: true,
-    // reason: null,
-    // message: null
-    // },
-    // mime_type: "application/zip",
-    // file_name: "bun-darwin-x64.zip",
-    // file_size: "18.9 MB",
-    // sha1sum: "7fdd94c18cfea3189ae22c14e37675d80092c085",
-    // sha256sum: "3cc2cb08be689f68c7b26941477c13783e18d8ba73c088b6d14248d8e742713d"
-    // },
-    const createdAt = new Date(build.created_at);
-    const finishedAt = new Date(build.finished_at);
+      const artifactsResponse = await fetch(artifactsUrl.toString());
 
-    yield* artifacts
-      .filter((artifact) => artifact.file_name.includes(".zip"))
-      .map((artifact: any) => ({
-        url: new URL(artifact.url, "https://buildkite.com").href,
-        filename: artifact.file_name,
-        name: artifact.file_name.replace(".zip", ""),
-        createdAt: createdAt,
-        elapsed: finishedAt.getTime() - createdAt.getTime(),
-        shasum: artifact.sha1sum,
-      }));
+      if (!artifactsResponse.ok) {
+        console.debug(
+          `Failed to fetch artifacts for build ${buildkiteID}: ${artifactsResponse.statusText}`
+        );
+        continue;
+      }
+
+      const artifacts = (await artifactsResponse.json()) as Array<{
+        file_name: string;
+        url: string;
+        sha1sum: string;
+      }>;
+
+      const createdAt = new Date(build.created_at);
+      const finishedAt = new Date(build.finished_at);
+
+      for (const artifact of artifacts) {
+        if (!artifact.file_name.includes(".zip")) continue;
+
+        if (!artifact.url) {
+          console.debug(`Artifact ${artifact.file_name} has no URL`);
+          continue;
+        }
+
+        try {
+          const fullUrl = new URL(artifact.url, "https://buildkite.com");
+          yield {
+            url: fullUrl.toString(),
+            filename: artifact.file_name,
+            name: artifact.file_name.replace(".zip", ""),
+            createdAt: createdAt,
+            elapsed: finishedAt.getTime() - createdAt.getTime(),
+            shasum: artifact.sha1sum,
+          };
+        } catch (error) {
+          console.debug(`Failed to parse artifact URL: ${error}`);
+          continue;
+        }
+      }
+    } catch (error) {
+      console.debug(`Failed to process build ${buildkiteID}: ${error}`);
+      continue;
+    }
   }
 }
 
 export async function* getBuildArtifactUrls(githubPRUrl: string) {
-  for await (let url of getBuildkitePipelineUrl(githubPRUrl)) {
-    const iter = getBuildArtifacts(url);
-    while (true) {
-      const result = await iter.next();
-      if (!result?.value) {
-        break;
+  if (PR_OR_COMMIT.type === "pr") {
+    // For PRs, check all commits
+    for await (const url of getPRCommits(Number(PR_OR_COMMIT.value))) {
+      const iter = getBuildArtifacts(url);
+      while (true) {
+        const result = await iter.next();
+        if (!result?.value) {
+          break;
+        }
+        yield result.value;
       }
-
-      yield result.value;
+    }
+  } else {
+    // For single commits, use the original behavior
+    for await (const url of getBuildkitePipelineUrl(githubPRUrl)) {
+      const iter = getBuildArtifacts(url);
+      while (true) {
+        const result = await iter.next();
+        if (!result?.value) {
+          break;
+        }
+        yield result.value;
+      }
     }
   }
 }
@@ -323,7 +365,7 @@ const ARTIFACT_NAME = (() => {
   return basename;
 })();
 
-function isArtifactName(name) {
+function isArtifactName(name: string) {
   if (name === ARTIFACT_NAME) {
     return true;
   }
@@ -414,32 +456,47 @@ const OUT_DIR =
     : process.env.BUN_INSTALL || ".");
 
 // Modify the main download loop
-let prData, commitData;
+type PRData = { statuses_url: string; head: { sha: string } };
+type CommitData = { url: string; sha: string };
+
+let statusesUrl: string;
+let prData: PRData | undefined;
+let commitData: CommitData | undefined;
+
 if (PR_OR_COMMIT.type === "pr") {
   // Get PR details to find the head commit SHA
-  ({ data: prData } = await octokit.pulls.get({
+  const response = await octokit.pulls.get({
     owner: REPO_OWNER,
     repo: REPO_NAME,
     pull_number: Number(PR_OR_COMMIT.value),
-  }));
+  });
+
+  if (!response.data?.statuses_url || !response.data?.head?.sha) {
+    throw new Error(`Failed to fetch PR data for PR #${PR_OR_COMMIT.value}`);
+  }
+
+  statusesUrl = response.data.statuses_url;
+  prData = response.data;
 } else {
   // Get commit details
-  commitData = await getCommitDetails(PR_OR_COMMIT.value);
-}
+  const response = await getCommitDetails(PR_OR_COMMIT.value);
 
-const statusesUrl =
-  PR_OR_COMMIT.type === "pr"
-    ? prData.statuses_url
-    : commitData.url + "/statuses";
+  if (!response?.url || !response?.sha) {
+    throw new Error(`Failed to fetch commit data for ${PR_OR_COMMIT.value}`);
+  }
+
+  statusesUrl = response.url + "/statuses";
+  commitData = response;
+}
 
 for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
   if (!isArtifactName(artifact.name)) {
     if (process.env.DEBUG) {
       console.debug("Skipping artifact", artifact.name);
     }
-
     continue;
   }
+
   console.log("Found artifact", artifact.name);
   console.log(
     "Choosing artifact from run that started",
@@ -454,6 +511,7 @@ for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
   if (!response.ok) {
     throw new Error(`Failed to download artifact: ${response.statusText}`);
   }
+
   console.log(
     "Downloading",
     JSON.stringify(ARTIFACT_NAME),
@@ -462,11 +520,19 @@ for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
     }`,
     "\n-> " + artifact.url + "\n"
   );
+
   const blob = await response.blob();
   const filename = `${ARTIFACT_NAME}-${PR_OR_COMMIT.type}-${PR_OR_COMMIT.value}-${artifact.shasum}.zip`;
-  const dest = `bun-${PR_OR_COMMIT.value}-${
-    PR_OR_COMMIT.type === "pr" ? prData.head.sha : commitData.sha
-  }`;
+
+  // Get the appropriate SHA based on whether this is a PR or commit
+  const sha = PR_OR_COMMIT.type === "pr" ? prData?.head.sha : commitData?.sha;
+
+  if (!sha) {
+    throw new Error("Failed to get commit SHA");
+  }
+
+  const dest = `bun-${PR_OR_COMMIT.value}-${sha}`;
+
   await $`rm -rf ${ARTIFACT_NAME} ${dest} ${ARTIFACT_NAME}.zip ${ARTIFACT_NAME}-artifact.zip ${filename}`;
   await Bun.write(filename, blob);
   await $`unzip ${filename} && rm -rf ${filename}`.quiet();
@@ -482,9 +548,7 @@ for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
       extension = ".exe";
     }
 
-    let fullName = `${inFolderWithoutExtension}-${
-      PR_OR_COMMIT.type === "pr" ? prData.head.sha : commitData.sha
-    }-${PR_OR_COMMIT.type}${PR_OR_COMMIT.value}${extension}`;
+    let fullName = `${inFolderWithoutExtension}-${sha}-${PR_OR_COMMIT.type}${PR_OR_COMMIT.value}${extension}`;
 
     await $`cp ${dest}/${inFolder} ${OUT_DIR}/${fullName} && rm -rf ${dest} ${OUT_DIR}/${inFolderWithoutExtension}-${PR_OR_COMMIT.value}${extension} ${OUT_DIR}/${inFolderWithoutExtension}-latest${extension}`.quiet();
     symlinkSync(
