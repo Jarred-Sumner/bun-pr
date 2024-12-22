@@ -164,6 +164,12 @@ async function* getPRCommits(prNumber: number) {
     per_page: 100,
   });
 
+  commits.sort(
+    (a, b) =>
+      new Date(b.commit?.author?.date || "").getTime() -
+      new Date(a.commit?.author?.date || "").getTime()
+  );
+
   // Start with newest commits
   for (const commit of commits) {
     const { data: statuses } = await octokit.repos.listCommitStatusesForRef({
