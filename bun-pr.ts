@@ -216,7 +216,8 @@ async function* getBuildArtifacts(buildkiteUrl: string) {
   if (
     result.state !== "passed" &&
     result.state !== "failed" &&
-    result.state !== "finished"
+    result.state !== "finished" &&
+    result.state !== "failing"
   ) {
     console.debug(
       `Build ${buildkiteID} is in state: ${result.state}, ignoring...`
@@ -568,13 +569,18 @@ for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
       "file"
     );
     console.write(
-      "Downloaded to:" + "\n\n",
-      `\x1b[1m\x1b[32m${OUT_DIR}${sep}${fullName}\x1b[0m` + "\n\n",
-      `To run the downloaded executable, use any of the following following commands:` +
-        "\n\n",
-      `\x1b[1m\x1b[32m${fullName.replaceAll(".exe", "")}${extension}\x1b[0m\n`,
-      `\x1b[1m\x1b[32m${inFolderWithoutExtension}-${PR_OR_COMMIT.value}${extension}\x1b[0m\n`,
-      `\x1b[1m\x1b[32m${inFolderWithoutExtension}-latest${extension}\x1b[0m\n`
+      "Downloaded to:" +
+        "\n\n" +
+        `\x1b[1m\x1b[32m${OUT_DIR}${sep}${fullName}\x1b[0m` +
+        "\n\n" +
+        "To run the downloaded executable, use any of the following following commands:" +
+        "\n\n" +
+        `\x1b[1m\x1b[32m${fullName.replaceAll(
+          ".exe",
+          ""
+        )}${extension}\x1b[0m\n` +
+        `\x1b[1m\x1b[32m${inFolderWithoutExtension}-${PR_OR_COMMIT.value}${extension}\x1b[0m\n` +
+        `\x1b[1m\x1b[32m${inFolderWithoutExtension}-latest${extension}\x1b[0m\n`
     );
   } else {
     console.log("No executable found in the artifact folder.", files);
