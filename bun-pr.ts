@@ -179,7 +179,7 @@ async function* getPRCommits(prNumber: number) {
     });
 
     const buildkiteStatuses = statuses
-      .filter((status) => status.context === "buildkite/bun")
+      .filter((status) => status.context.includes("buildkite"))
       .sort(
         (a, b) =>
           new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
@@ -194,9 +194,15 @@ async function* getPRCommits(prNumber: number) {
 }
 
 async function* getBuildArtifacts(buildkiteUrl: string) {
-  const buildkiteID = buildkiteUrl.split("/").at(-1);
+  let buildkiteID = buildkiteUrl.split("/").at(-1);
+
   if (!buildkiteID) {
     console.debug("Invalid buildkite URL");
+    return;
+  }
+
+  if (buildkiteID.includes("#")) {
+    // Skip these
     return;
   }
 
@@ -210,7 +216,12 @@ async function* getBuildArtifacts(buildkiteUrl: string) {
     return;
   }
 
-  const result: BuildkiteBuild = (await response.json()) as BuildkiteBuild;
+  try {
+    var result: BuildkiteBuild = (await response.json()) as BuildkiteBuild;
+  } catch (e) {
+    console.debug(`Failed to parse buildkite build ${buildkiteID}: ${e}`);
+    return;
+  }
 
   // Skip builds that aren't finished yet
   if (
