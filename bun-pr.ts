@@ -228,7 +228,9 @@ async function* getBuildArtifacts(buildkiteUrl: string) {
     result.state !== "passed" &&
     result.state !== "failed" &&
     result.state !== "finished" &&
-    result.state !== "failing"
+    result.state !== "failing" &&
+    result.state !== "canceled" &&
+    result.state !== "started"
   ) {
     console.debug(
       `Build ${buildkiteID} is in state: ${result.state}, ignoring...`
