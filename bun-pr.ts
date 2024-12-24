@@ -202,8 +202,7 @@ async function* getBuildArtifacts(buildkiteUrl: string) {
   }
 
   if (buildkiteID.includes("#")) {
-    // Skip these
-    return;
+    buildkiteID = buildkiteID.split("#").at(0);
   }
 
   const pipelineUrl = `https://buildkite.com/bun/bun/builds/${buildkiteID}.json`;
@@ -310,14 +309,7 @@ export async function* getBuildArtifactUrls(githubPRUrl: string) {
   if (PR_OR_COMMIT.type === "pr") {
     // For PRs, check all commits
     for await (const url of getPRCommits(Number(PR_OR_COMMIT.value))) {
-      const iter = getBuildArtifacts(url);
-      while (true) {
-        const result = await iter.next();
-        if (!result?.value) {
-          break;
-        }
-        yield result.value;
-      }
+      yield* getBuildArtifacts(url);
     }
   } else {
     // For single commits, use the original behavior
