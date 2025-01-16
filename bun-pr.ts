@@ -13,6 +13,18 @@ const cwd = realpathSync(import.meta.dir);
 $.cwd(cwd);
 process.chdir(cwd);
 
+let cachedResponses = new Map<string, Promise<Response>>();
+async function fetch(url: string, options: RequestInit) {
+  if (cachedResponses.has(url)) {
+    return (await cachedResponses.get(url))!.clone();
+  }
+  let defer = Promise.withResolvers<Response>();
+  cachedResponses.set(url, defer.promise);
+  const response = await Bun.fetch(url, options);
+  defer.resolve(response.clone());
+  return response;
+}
+
 let GITHUB_TOKEN = "";
 try {
   GITHUB_TOKEN =
