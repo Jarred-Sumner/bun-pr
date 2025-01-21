@@ -2,6 +2,11 @@
 
 Download a build of bun from a pull request in bun's github repository and add it to $PATH.
 
+### For Windows
+>You must run this script from the shell with `administrator` rights. Otherwise, you will get the error `"EPERM"` when creating a symlink.
+
+### How to use
+
 ```sh
 bunx bun-pr jarred/process-change
 ```
