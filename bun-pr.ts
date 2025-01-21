@@ -14,7 +14,7 @@ $.cwd(cwd);
 process.chdir(cwd);
 
 let cachedResponses = new Map<string, Promise<Response>>();
-async function fetch(url: string, options: RequestInit) {
+async function fetch(url: string, options?: RequestInit) {
   if (cachedResponses.has(url)) {
     return (await cachedResponses.get(url))!.clone();
   }
@@ -476,7 +476,7 @@ console.log(
 const OUT_DIR =
   process.env.BUN_OUT_DIR ||
   (Bun.which("bun")
-    ? dirname(Bun.which("bun"))
+    ? dirname(Bun.which("bun") as string)
     : process.env.BUN_INSTALL || ".");
 
 // Modify the main download loop
@@ -503,7 +503,7 @@ if (PR_OR_COMMIT.type === "pr") {
   prData = response.data;
 } else {
   // Get commit details
-  const response = await getCommitDetails(PR_OR_COMMIT.value);
+  const response = await getCommitDetails(PR_OR_COMMIT.value!);
 
   if (!response?.url || !response?.sha) {
     throw new Error(`Failed to fetch commit data for ${PR_OR_COMMIT.value}`);
@@ -558,7 +558,7 @@ for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
   const dest = `bun-${PR_OR_COMMIT.value}-${sha}`;
 
   await $`rm -rf ${ARTIFACT_NAME} ${dest} ${ARTIFACT_NAME}.zip ${ARTIFACT_NAME}-artifact.zip ${filename}`;
-  await Bun.write(filename, blob);
+  await Bun.write(filename, blob as Blob);
   await $`unzip ${filename} && rm -rf ${filename}`.quiet();
   await $`cp -R ${ARTIFACT_NAME} ${dest}`;
   const files = readdirSync(`./${dest}`);
