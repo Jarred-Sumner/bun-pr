@@ -150,7 +150,7 @@ type Pipeline = {
 async function* getBuildkitePipelineUrl(buildkiteUrl: string) {
   const headers = {
     Accept: "application/vnd.github.v3+json",
-    ...(GITHUB_TOKEN ? {Authorization: `token ${GITHUB_TOKEN}`} : {}),
+    ...(GITHUB_TOKEN ? { Authorization: `token ${GITHUB_TOKEN}` } : {}),
   };
 
   const statusesResponse = await fetch(buildkiteUrl + "?per_page=100", {
@@ -170,7 +170,7 @@ async function* getBuildkitePipelineUrl(buildkiteUrl: string) {
 }
 
 async function* getPRCommits(prNumber: number) {
-  const {data: commits} = await octokit.pulls.listCommits({
+  const { data: commits } = await octokit.pulls.listCommits({
     owner: REPO_OWNER,
     repo: REPO_NAME,
     pull_number: prNumber,
@@ -185,7 +185,7 @@ async function* getPRCommits(prNumber: number) {
 
   // Start with newest commits
   for (const commit of commits) {
-    const {data: statuses} = await octokit.repos.listCommitStatusesForRef({
+    const { data: statuses } = await octokit.repos.listCommitStatusesForRef({
       owner: REPO_OWNER,
       repo: REPO_NAME,
       ref: commit.sha,
@@ -406,7 +406,7 @@ function isArtifactName(name: string) {
 
 // Add this new function to fetch commit details
 async function getCommitDetails(sha: string) {
-  const {data: commitData} = await octokit.repos.getCommit({
+  const { data: commitData } = await octokit.repos.getCommit({
     owner: REPO_OWNER,
     repo: REPO_NAME,
     ref: sha,
@@ -421,25 +421,25 @@ const PR_OR_COMMIT = await (async () => {
   if (last?.startsWith("https://github.com")) {
     const parts = new URL(last).pathname.split("/");
     return parts[parts.length - 2] === "commit"
-      ? {type: "commit", value: parts.at(-1)}
-      : {type: "pr", value: parts.at(-1)};
+      ? { type: "commit", value: parts.at(-1) }
+      : { type: "pr", value: parts.at(-1) };
   } else if (last?.startsWith("https://api.github.com")) {
     const parts = new URL(last).pathname.split("/");
     return parts[parts.length - 2] === "commits"
-      ? {type: "commit", value: parts.at(-1)}
-      : {type: "pr", value: parts.at(-1)};
+      ? { type: "commit", value: parts.at(-1) }
+      : { type: "pr", value: parts.at(-1) };
   } else if (last?.startsWith("#")) {
-    return {type: "pr", value: last.slice(1)};
+    return { type: "pr", value: last.slice(1) };
   } else if (Number(last) === Number(last)) {
-    return {type: "pr", value: last};
+    return { type: "pr", value: last };
   }
   // long git sha or short git sha
   else if (last?.match(/^[0-9a-f]{40}$/) || last?.match(/^[0-9a-f]{7,}$/)) {
-    return {type: "commit", value: last};
+    return { type: "commit", value: last };
   } else {
     // resolve branch name to PR number or latest commit from argv
     const branch = last;
-    let {data: prs = []} = await octokit.pulls.list({
+    let { data: prs = [] } = await octokit.pulls.list({
       owner: REPO_OWNER,
       repo: REPO_NAME,
       state: "open",
@@ -447,9 +447,9 @@ const PR_OR_COMMIT = await (async () => {
     });
 
     if (prs.length) {
-      return {type: "pr", value: prs[0].number.toString()};
+      return { type: "pr", value: prs[0].number.toString() };
     } else {
-      const {data: commits} = await octokit.repos.listCommits({
+      const { data: commits } = await octokit.repos.listCommits({
         owner: REPO_OWNER,
         repo: REPO_NAME,
         sha: branch,
@@ -457,7 +457,7 @@ const PR_OR_COMMIT = await (async () => {
       });
 
       if (commits.length) {
-        return {type: "commit", value: commits[0].sha};
+        return { type: "commit", value: commits[0].sha };
       }
 
       throw new Error(`No open PR or recent commit found for branch ${branch}`);
@@ -582,10 +582,10 @@ for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
 
     await $`cp ${dest}/${inFolder} ${OUT_DIR}/${fullName} && rm -rf ${dest} ${OUT_DIR}/${inFolderWithoutExtension}-${PR_OR_COMMIT.value}${extension} ${OUT_DIR}/${inFolderWithoutExtension}-latest${extension}`.quiet();
     /**
-    * Need admin perms in shell (Windows)
-    * @see https://github.com/pnpm/pnpm/issues/4315
-    * @see https://github.com/nodejs/node-v0.x-archive/issues/9101
-    */
+     * Need admin perms in shell (Windows)
+     * @see https://github.com/pnpm/pnpm/issues/4315
+     * @see https://github.com/nodejs/node-v0.x-archive/issues/9101
+     */
     symlinkSync(
       `${OUT_DIR}${sep}${fullName}`,
       `${OUT_DIR}${sep}${inFolderWithoutExtension}-${PR_OR_COMMIT.value}${extension}`,
