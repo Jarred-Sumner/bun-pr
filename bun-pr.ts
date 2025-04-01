@@ -6,6 +6,7 @@
 import { Octokit } from "@octokit/rest";
 import { $ } from "bun";
 import { realpathSync, readdirSync, symlinkSync } from "fs";
+import { cp } from "fs/promises";
 import { dirname, sep } from "path";
 
 $.throws(true);
@@ -579,8 +580,22 @@ for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
     }
 
     let fullName = `${inFolderWithoutExtension}-${sha}-${PR_OR_COMMIT.type}${PR_OR_COMMIT.value}${extension}`;
+    const dSYM = files.find((f) => f.toLowerCase().endsWith(".dsym"));
+    if (dSYM) {
+      const dsymDest = `${OUT_DIR}/${fullName}.dSYM`;
+      try {
+        await cp(`${dest}/${dSYM}`, dsymDest, {
+          recursive: true,
+          force: true,
+        });
+        console.log(`Copied debugging symbols to:\n  ${dsymDest}`);
+      } catch (e) {
+        console.debug(`No .dSYM file found or failed to copy: ${e}`);
+      }
+    }
 
     await $`cp ${dest}/${inFolder} ${OUT_DIR}/${fullName} && rm -rf ${dest} ${OUT_DIR}/${inFolderWithoutExtension}-${PR_OR_COMMIT.value}${extension} ${OUT_DIR}/${inFolderWithoutExtension}-latest${extension}`.quiet();
+
     /**
      * Need admin perms in shell (Windows)
      * @see https://github.com/pnpm/pnpm/issues/4315
