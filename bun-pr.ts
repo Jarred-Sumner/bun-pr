@@ -339,6 +339,14 @@ export async function* getBuildArtifactUrls(githubPRUrl: string) {
   }
 }
 
+const IS_ASAN = (() => {
+  const asanIndex = process.argv.findIndex((a) => a === "--asan");
+  if (asanIndex !== -1) {
+    process.argv.splice(asanIndex, 1);
+    return true;
+  }
+})();
+
 const IS_PROFILE = (() => {
   const profileIndex = process.argv.findIndex((a) => a === "--profile");
   if (profileIndex !== -1) {
@@ -385,6 +393,10 @@ const ARTIFACT_NAME = (() => {
 
   if (IS_PROFILE) {
     basename += "-profile";
+  }
+
+  if (IS_ASAN) {
+    basename += "-asan";
   }
 
   return basename;
@@ -565,7 +577,8 @@ for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
   const files = readdirSync(`./${dest}`);
   const inFolder =
     files.find((f) => f === "bun" || f === "bun.exe") ||
-    files.find((f) => f === "bun-profile" || f === "bun-profile.exe");
+    files.find((f) => f === "bun-profile" || f === "bun-profile.exe") ||
+    files.find((f) => f === "bun-asan" || f === "bun-asan.exe");
   if (inFolder) {
     const inFolderWithoutExtension = inFolder.replaceAll(".exe", "");
     let extension = "";
