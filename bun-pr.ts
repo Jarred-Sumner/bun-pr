@@ -15,7 +15,8 @@ $.cwd(cwd);
 process.chdir(cwd);
 
 let cachedResponses = new Map<string, Promise<Response>>();
-async function fetch(url: string, options: RequestInit) {
+
+async function fetch(url: string, options?: RequestInit) {
   if (cachedResponses.has(url)) {
     return (await cachedResponses.get(url))!.clone();
   }
@@ -164,7 +165,7 @@ async function* getBuildkitePipelineUrl(buildkiteUrl: string) {
     context: string;
     target_url: string;
   }>;
-  yield* statuses
+  yield * statuses
     .filter((status) => status.context === "buildkite/bun")
     .map((status) => status.target_url);
 }
@@ -489,7 +490,7 @@ console.log(
 const OUT_DIR =
   process.env.BUN_OUT_DIR ||
   (Bun.which("bun")
-    ? dirname(Bun.which("bun"))
+    ? dirname(Bun.which("bun") as string)
     : process.env.BUN_INSTALL || ".");
 
 // Modify the main download loop
@@ -516,7 +517,7 @@ if (PR_OR_COMMIT.type === "pr") {
   prData = response.data;
 } else {
   // Get commit details
-  const response = await getCommitDetails(PR_OR_COMMIT.value);
+  const response = await getCommitDetails(PR_OR_COMMIT.value!);
 
   if (!response?.url || !response?.sha) {
     throw new Error(`Failed to fetch commit data for ${PR_OR_COMMIT.value}`);
@@ -571,9 +572,14 @@ for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
   const dest = `bun-${PR_OR_COMMIT.value}-${sha}`;
 
   await $`rm -rf ${ARTIFACT_NAME} ${dest} ${ARTIFACT_NAME}.zip ${ARTIFACT_NAME}-artifact.zip ${filename}`;
-  await Bun.write(filename, blob);
-  await $`unzip ${filename} && rm -rf ${filename}`.quiet();
+  await Bun.write(filename, blob as Blob);
+  if (process.platform === "win32") {
+    await $`tar -xf ${filename} && rm -rf ${filename}`.quiet();
+  } else {
+    await $`unzip ${filename} && rm -rf ${filename}`.quiet();
+  }
   await $`cp -R ${ARTIFACT_NAME} ${dest}`;
+  await $`rm -rf ${ARTIFACT_NAME}`;
   const files = readdirSync(`./${dest}`);
   const inFolder =
     files.find((f) => f === "bun" || f === "bun.exe") ||
@@ -603,29 +609,34 @@ for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
 
     await $`cp ${dest}/${inFolder} ${OUT_DIR}/${fullName} && rm -rf ${dest} ${OUT_DIR}/${inFolderWithoutExtension}-${PR_OR_COMMIT.value}${extension} ${OUT_DIR}/${inFolderWithoutExtension}-latest${extension}`.quiet();
 
+    /**
+     * Need admin perms in shell (Windows)
+     * @see https://github.com/pnpm/pnpm/issues/4315
+     * @see https://github.com/nodejs/node-v0.x-archive/issues/9101
+     */
     symlinkSync(
-      `${OUT_DIR}/${fullName}`,
-      `${OUT_DIR}/${inFolderWithoutExtension}-${PR_OR_COMMIT.value}${extension}`,
+      `${OUT_DIR}${sep}${fullName}`,
+      `${OUT_DIR}${sep}${inFolderWithoutExtension}-${PR_OR_COMMIT.value}${extension}`,
       "file"
     );
     symlinkSync(
-      `${OUT_DIR}/${fullName}`,
-      `${OUT_DIR}/${inFolderWithoutExtension}-latest${extension}`,
+      `${OUT_DIR}${sep}${fullName}`,
+      `${OUT_DIR}${sep}${inFolderWithoutExtension}-latest${extension}`,
       "file"
     );
     console.write(
       "Downloaded to:" +
-        "\n\n" +
-        `\x1b[1m\x1b[32m${OUT_DIR}${sep}${fullName}\x1b[0m` +
-        "\n\n" +
-        "To run the downloaded executable, use any of the following following commands:" +
-        "\n\n" +
-        `\x1b[1m\x1b[32m${fullName.replaceAll(
-          ".exe",
-          ""
-        )}${extension}\x1b[0m\n` +
-        `\x1b[1m\x1b[32m${inFolderWithoutExtension}-${PR_OR_COMMIT.value}${extension}\x1b[0m\n` +
-        `\x1b[1m\x1b[32m${inFolderWithoutExtension}-latest${extension}\x1b[0m\n`
+      "\n\n" +
+      `\x1b[1m\x1b[32m${OUT_DIR}${sep}${fullName}\x1b[0m` +
+      "\n\n" +
+      "To run the downloaded executable, use any of the following following commands:" +
+      "\n\n" +
+      `\x1b[1m\x1b[32m${fullName.replaceAll(
+        ".exe",
+        ""
+      )}${extension}\x1b[0m\n` +
+      `\x1b[1m\x1b[32m${inFolderWithoutExtension}-${PR_OR_COMMIT.value}${extension}\x1b[0m\n` +
+      `\x1b[1m\x1b[32m${inFolderWithoutExtension}-latest${extension}\x1b[0m\n`
     );
   } else {
     console.log("No executable found in the artifact folder.", files);
