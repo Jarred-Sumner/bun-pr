@@ -428,7 +428,43 @@ async function getCommitDetails(sha: string) {
 
 // Modify the PR_ID logic to handle commit hashes
 const PR_OR_COMMIT = await (async () => {
-  let last = process.argv.at(-1);
+  let last = process.argv.at(-1) || "";
+
+  if (last === "." || last === import.meta.path) {
+    const currentBranchName = (
+      await $`git rev-parse --abbrev-ref HEAD`.text()
+    ).trim();
+    if (currentBranchName === "main" || currentBranchName === "master") {
+      // return the most recent commit
+      const { data: commits } = await octokit.repos.listCommits({
+        owner: REPO_OWNER,
+        repo: REPO_NAME,
+        per_page: 1,
+      });
+      return { type: "commit", value: commits[0].sha };
+    }
+
+    // get the current PR o r commit
+    const { data: prs } = await octokit.pulls.list({
+      owner: REPO_OWNER,
+      repo: REPO_NAME,
+      state: "open",
+      head: `${REPO_OWNER}:${currentBranchName}`,
+    });
+    if (prs.length) {
+      return { type: "pr", value: prs[0].number.toString() };
+    } else {
+      const { data: commits } = await octokit.repos.listCommits({
+        owner: REPO_OWNER,
+        repo: REPO_NAME,
+        sha: currentBranchName,
+        per_page: 1,
+      });
+      if (commits.length) {
+        return { type: "commit", value: commits[0].sha };
+      }
+    }
+  }
 
   if (last?.startsWith("https://github.com")) {
     const parts = new URL(last).pathname.split("/");
