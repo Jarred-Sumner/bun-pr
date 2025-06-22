@@ -10,6 +10,7 @@ import { cp } from "fs/promises";
 import { dirname, sep } from "path";
 
 $.throws(true);
+const originalCwd = process.cwd();
 const cwd = realpathSync(import.meta.dir);
 $.cwd(cwd);
 process.chdir(cwd);
@@ -432,8 +433,9 @@ const PR_OR_COMMIT = await (async () => {
 
   if (last === "." || last === import.meta.path) {
     const currentBranchName = (
-      await $`git rev-parse --abbrev-ref HEAD`.text()
+      await $`git rev-parse --abbrev-ref HEAD`.cwd(originalCwd).text()
     ).trim();
+    $.cwd(cwd);
     if (currentBranchName === "main" || currentBranchName === "master") {
       // return the most recent commit
       const { data: commits } = await octokit.repos.listCommits({
