@@ -7,7 +7,8 @@ import { Octokit } from "@octokit/rest";
 import { $ } from "bun";
 import { realpathSync, readdirSync, symlinkSync } from "fs";
 import { cp } from "fs/promises";
-import { dirname, sep } from "path";
+import { dirname, sep, join, basename } from "path";
+import { tmpdir } from "os";
 
 $.throws(true);
 const originalCwd = process.cwd();
@@ -207,7 +208,10 @@ async function* getPRCommits(prNumber: number) {
   }
 }
 
-async function* getBuildArtifacts(buildkiteUrl: string) {
+async function* getBuildArtifacts(
+  buildkiteUrl: string,
+  options?: { includeAllJobs?: boolean }
+) {
   let buildkiteID = buildkiteUrl.split("/").at(-1);
 
   if (!buildkiteID) {
@@ -251,13 +255,22 @@ async function* getBuildArtifacts(buildkiteUrl: string) {
     return;
   }
 
-  const jobs = result.jobs.filter((job) =>
-    job.step_key?.includes?.("build-bun")
-  );
+  let jobs = result.jobs;
 
-  if (!jobs.length) {
-    console.debug(`Build ${buildkiteID} has no build-bun jobs`);
-    return;
+  if (!options?.includeAllJobs) {
+    jobs = result.jobs.filter((job) => {
+      if (IS_LLDB || IS_GDB) {
+        return job.step_key?.includes?.("test-bun");
+      }
+      return job.step_key?.includes?.("build-bun");
+    });
+
+    if (!jobs.length) {
+      console.debug(
+        `Build ${buildkiteID} has no ${IS_LLDB || IS_GDB ? "test-bun" : "build-bun"} jobs`
+      );
+      return;
+    }
   }
 
   for (const build of jobs) {
@@ -290,7 +303,18 @@ async function* getBuildArtifacts(buildkiteUrl: string) {
       const finishedAt = new Date(build.finished_at);
 
       for (const artifact of artifacts) {
-        if (!artifact.file_name.includes(".zip")) continue;
+        if (!options?.includeAllJobs) {
+          if (IS_LLDB || IS_GDB) {
+            // Look for core dump artifacts
+            if (
+              !artifact.file_name.includes(".tar.gz.age") &&
+              !artifact.file_name.includes(".cores")
+            )
+              continue;
+          } else {
+            if (!artifact.file_name.includes(".zip")) continue;
+          }
+        }
 
         if (!artifact.url) {
           console.debug(`Artifact ${artifact.file_name} has no URL`);
@@ -302,10 +326,15 @@ async function* getBuildArtifacts(buildkiteUrl: string) {
           yield {
             url: fullUrl.toString(),
             filename: artifact.file_name,
-            name: artifact.file_name.replace(".zip", ""),
+            name: artifact.file_name
+              .replace(".zip", "")
+              .replace(".tar.gz.age", ""),
             createdAt: createdAt,
             elapsed: finishedAt.getTime() - createdAt.getTime(),
             shasum: artifact.sha1sum,
+            jobName: build.name,
+            stepKey: build.step_key,
+            buildId: buildkiteID,
           };
         } catch (error) {
           console.debug(`Failed to parse artifact URL: ${error}`);
@@ -362,6 +391,26 @@ const IS_BASELINE = (() => {
   const profileIndex = process.argv.findIndex((a) => a === "--baseline");
   if (profileIndex !== -1) {
     process.argv.splice(profileIndex, 1);
+    return true;
+  } else {
+    return false;
+  }
+})();
+
+const IS_LLDB = (() => {
+  const lldbIndex = process.argv.findIndex((a) => a === "--lldb");
+  if (lldbIndex !== -1) {
+    process.argv.splice(lldbIndex, 1);
+    return true;
+  } else {
+    return false;
+  }
+})();
+
+const IS_GDB = (() => {
+  const gdbIndex = process.argv.findIndex((a) => a === "--gdb");
+  if (gdbIndex !== -1) {
+    process.argv.splice(gdbIndex, 1);
     return true;
   } else {
     return false;
@@ -516,13 +565,15 @@ const PR_OR_COMMIT = await (async () => {
 })();
 
 // Update console log to show whether we're searching for a PR or commit
-console.log(
-  "Searching GitHub for artifact",
-  ARTIFACT_NAME,
-  `from ${PR_OR_COMMIT.type === "pr" ? "PR #" : "commit"} ${
-    PR_OR_COMMIT.value
-  }...`
-);
+if (!IS_LLDB && !IS_GDB) {
+  console.log(
+    "Searching GitHub for artifact",
+    ARTIFACT_NAME,
+    `from ${PR_OR_COMMIT.type === "pr" ? "PR #" : "commit"} ${
+      PR_OR_COMMIT.value
+    }...`
+  );
+}
 
 const OUT_DIR =
   process.env.BUN_OUT_DIR ||
@@ -564,6 +615,381 @@ if (PR_OR_COMMIT.type === "pr") {
   commitData = response;
 }
 
+if (IS_LLDB || IS_GDB) {
+  // Handle --lldb/--gdb mode for debugging core dumps
+  const coreDumps: Array<{ artifact: any; pid?: string }> = [];
+  let selectedDump: { artifact: any; pid?: string } | null = null;
+  let userSelection: string | null = null;
+  let isCollecting = true;
+
+  console.log("\n🔍 Searching for core dumps...\n");
+
+  // Create a single stdin reader that we'll use for all input
+  let stdinReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  let inputBuffer = "";
+
+  let hasSelection = false;
+
+  async function getNextLine(): Promise<string> {
+    if (!stdinReader) {
+      stdinReader = Bun.stdin.stream().getReader();
+    }
+
+    const decoder = new TextDecoder();
+
+    while (true) {
+      const { done, value } = await stdinReader.read();
+      if (done) return inputBuffer;
+
+      inputBuffer += decoder.decode(value);
+      const newlineIndex = inputBuffer.indexOf("\n");
+
+      if (newlineIndex !== -1) {
+        const line = inputBuffer.slice(0, newlineIndex).trim();
+        inputBuffer = inputBuffer.slice(newlineIndex + 1);
+        hasSelection = true;
+        return line;
+      }
+    }
+  }
+
+  // Start listening for user input immediately
+  let inputPromise = getNextLine();
+  let inputProcessed = false;
+
+  // Collect core dumps and display them as we find them
+  for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
+    if (
+      artifact.filename.includes(".tar.gz.age") ||
+      artifact.filename.includes(".cores")
+    ) {
+      coreDumps.push({ artifact });
+
+      // Parse the job name to extract useful info
+      const jobName = artifact.jobName;
+      let displayName = jobName.replace(/\s*-\s*test-bun$/, "");
+
+      // Extract OS info
+      const isASAN = jobName.includes("ASAN");
+      const isBaseline = jobName.includes("baseline");
+
+      // Format the display line
+      const num = coreDumps.length;
+      console.log(`\x1b[32m${num}\x1b[90m)\x1b[0m ${displayName}`);
+    }
+
+    // Check if user has made a selection (check after every artifact, not just core dumps)
+    if (!inputProcessed && inputPromise) {
+      // Use Promise.race with a tiny timeout to check if input is ready
+      const raceResult = await Promise.race([
+        inputPromise.then((v) => ({ type: "input", value: v })),
+        new Promise((resolve) =>
+          setTimeout(() => resolve({ type: "continue" }), 1)
+        ),
+      ]);
+
+      if (raceResult.type === "input") {
+        inputProcessed = true;
+        userSelection = raceResult.value;
+        const index = parseInt(userSelection) - 1;
+        if (index >= 0 && index < coreDumps.length) {
+          selectedDump = coreDumps[index];
+          isCollecting = false;
+          // Cancel and close the stdin reader immediately
+          if (stdinReader) {
+            await stdinReader.cancel();
+            stdinReader = null;
+          }
+          break;
+        }
+      }
+    }
+    if (hasSelection) break;
+  }
+
+  isCollecting = false;
+
+  // If we still have the reader open and no selection was made, close it
+  if (stdinReader && !selectedDump) {
+    await stdinReader.cancel();
+    stdinReader = null;
+  }
+
+  if (!selectedDump && coreDumps.length === 0) {
+    console.log(
+      `\n❌ No core dumps found for ${PR_OR_COMMIT.type} ${PR_OR_COMMIT.value}.`
+    );
+    process.exit(1);
+  }
+
+  // If no selection was made yet, wait for one
+  if (!selectedDump) {
+    if (coreDumps.length === 1) {
+      selectedDump = coreDumps[0];
+      console.log(`\n✓ Auto-selected the only core dump`);
+    } else {
+      // Only read input if we haven't already received it
+      if (!userSelection) {
+        console.log(`\nChoose a core dump number:`);
+        // If we already closed the reader, create a new one
+        if (!stdinReader) {
+          userSelection = await getNextLine();
+        } else {
+          userSelection = await inputPromise;
+        }
+      }
+
+      const index = parseInt(userSelection || "0") - 1;
+      if (index >= 0 && index < coreDumps.length) {
+        selectedDump = coreDumps[index];
+      } else {
+        console.log("❌ Invalid selection");
+        process.exit(1);
+      }
+    }
+  }
+
+  console.log(`\n\x1b[90m${"─".repeat(50)}\x1b[0m`);
+  const selectedNum = coreDumps.indexOf(selectedDump) + 1;
+  const jobUrl = `https://buildkite.com/bun/bun/builds/${selectedDump.artifact.buildId}`;
+  // ANSI OSC 8 hyperlink format: \x1b]8;;URL\x1b\\TEXT\x1b]8;;\x1b\\
+  console.log(`\x1b[32m✓ Selected #${selectedNum}: \x1b]8;;${jobUrl}\x1b\\${selectedDump.artifact.jobName}\x1b]8;;\x1b\\\x1b[0m`);
+
+  // Check for AGE_CORES_IDENTITY environment variable
+  if (!process.env.AGE_CORES_IDENTITY?.startsWith("AGE-SECRET-KEY-")) {
+    console.error("\n❌ AGE_CORES_IDENTITY not set");
+    console.error("   Set AGE_CORES_IDENTITY to your age secret key");
+    process.exit(1);
+  }
+
+  // Parse the core dump filename to extract OS and architecture
+  const coreFilename = selectedDump.artifact.filename;
+  let os = "";
+  let arch = "";
+  let isBaseline = false;
+
+  // Extract OS
+  if (coreFilename.includes("darwin") || coreFilename.includes("macos")) {
+    os = "darwin";
+  } else if (
+    coreFilename.includes("alpine") ||
+    coreFilename.includes("debian") ||
+    coreFilename.includes("ubuntu")
+  ) {
+    os = "linux";
+  } else if (coreFilename.includes("windows")) {
+    os = "windows";
+  }
+
+  // Extract architecture
+  if (coreFilename.includes("aarch64") || coreFilename.includes("arm64")) {
+    arch = "aarch64";
+  } else if (coreFilename.includes("x64") || coreFilename.includes("x86_64")) {
+    arch = "x64";
+  }
+
+  // Check if it's baseline
+  if (
+    coreFilename.includes("baseline") ||
+    selectedDump.artifact.jobName?.includes("baseline")
+  ) {
+    isBaseline = true;
+  }
+
+  // Get the build URL for this specific build to find the matching bun executable
+  const buildUrl = `https://buildkite.com/bun/bun/builds/${selectedDump.artifact.buildId}`;
+
+  process.stdout.write("\n🔍 Finding matching bun executable...");
+
+  // Look for build-bun job artifacts in the same build
+  let bunArtifact: any = null;
+  for await (const artifact of getBuildArtifacts(buildUrl, {
+    includeAllJobs: true,
+  })) {
+    if (!artifact.filename.includes(".zip")) continue;
+    if (!artifact.stepKey?.includes("build-bun")) continue;
+
+    const artifactName = artifact.name.toLowerCase();
+    const matchesOS = artifactName.includes(os);
+    const matchesArch = artifactName.includes(
+      arch === "x64" ? "x64" : "aarch64"
+    );
+    const matchesBaseline = isBaseline
+      ? artifactName.includes("baseline")
+      : !artifactName.includes("baseline");
+    const matchesProfile = artifactName.includes("profile");
+
+    if (matchesOS && matchesArch && matchesBaseline && matchesProfile) {
+      bunArtifact = artifact;
+      process.stdout.write(" ✓\n");
+      break;
+    }
+  }
+
+  if (!bunArtifact) {
+    process.stdout.write(" ❌\n");
+    console.error(
+      `Could not find: bun-${os}-${arch}${
+        isBaseline ? "-baseline" : ""
+      }-profile`
+    );
+    process.exit(1);
+  }
+
+  // Download both artifacts in parallel
+  const id = Bun.hash(selectedDump.artifact.url + bunArtifact.url).toString(36);
+  const dir = join(tmpdir(), `bun-pr-debug-${id}.tmp`);
+  await $`mkdir -p ${dir}`.quiet();
+
+  process.stdout.write("📥 Downloading artifacts...");
+
+  // Start both downloads in parallel
+  const [coresResponse, bunResponse] = await Promise.all([
+    fetch(selectedDump.artifact.url),
+    fetch(bunArtifact.url),
+  ]);
+
+  if (!coresResponse.ok) {
+    process.stdout.write(" ❌\n");
+    throw new Error(
+      `Failed to download core dump: ${coresResponse.statusText}`
+    );
+  }
+  if (!bunResponse.ok) {
+    process.stdout.write(" ❌\n");
+    throw new Error(
+      `Failed to download bun executable: ${bunResponse.statusText}`
+    );
+  }
+
+  // Write both files in parallel
+  const coresPath = join(dir, selectedDump.artifact.filename);
+  const bunPath = join(dir, bunArtifact.filename);
+
+  await Promise.all([
+    Bun.write(coresPath, await coresResponse.blob()),
+    Bun.write(bunPath, await bunResponse.blob()),
+  ]);
+
+  process.stdout.write(" ✓\n");
+
+  // Extract bun executable
+  process.stdout.write("📦 Extracting...");
+  await $`unzip -j -o ${bunPath} -d ${dir}`.quiet();
+
+  // Find the executable
+  let bunExecutable: string | null = null;
+  const files = readdirSync(dir);
+  const exeFile = files.find(
+    (f) =>
+      f === "bun" ||
+      f === "bun.exe" ||
+      f === "bun-profile" ||
+      f === "bun-profile.exe"
+  );
+  if (exeFile) {
+    bunExecutable = join(dir, exeFile);
+    await $`chmod +x ${bunExecutable}`.quiet();
+  }
+
+  if (!bunExecutable) {
+    process.stdout.write(" ❌\n");
+    console.error("Could not find bun executable in the archive.");
+    process.exit(1);
+  }
+
+  // Decrypt core dump
+  await $`bash -c ${`age -d -i <(echo "$AGE_CORES_IDENTITY") < ${coresPath} | tar -zxC ${dir}`}`.quiet();
+  process.stdout.write(" ✓\n");
+
+  // Find the core file
+  let coreFiles: string[] = [];
+  const dirContents = readdirSync(dir);
+
+  // First check for core files in the root directory
+  coreFiles = dirContents.filter((f) => f.includes(".core"));
+
+  if (coreFiles.length === 0) {
+    // Check nested directories
+    for (const item of dirContents) {
+      const itemPath = join(dir, item);
+      try {
+        const stats = Bun.file(itemPath);
+        // Check if it's a directory (not a file)
+        if (
+          item.startsWith("bun-cores-") &&
+          !item.endsWith(".age") &&
+          !item.endsWith(".zip")
+        ) {
+          const nestedFiles = readdirSync(itemPath).filter((f) =>
+            f.includes(".core")
+          );
+          for (const file of nestedFiles) {
+            await $`mv ${join(itemPath, file)} ${join(dir, file)}`.quiet();
+            coreFiles.push(file);
+          }
+        }
+      } catch (e) {
+        // Not a directory, skip
+      }
+    }
+  }
+
+  if (coreFiles.length === 0) {
+    console.error("❌ No core files found in the archive");
+    process.exit(1);
+  }
+
+  // Extract PID from core filename if available
+  let selectedCore = coreFiles[0];
+  if (coreFiles.length > 1) {
+    console.log("\nMultiple core files found:");
+    coreFiles.forEach((file, index) => {
+      console.log(`\x1b[32m${index + 1}\x1b[90m)\x1b[0m ${file}`);
+    });
+    process.stdout.write(`\nChoose a core file (1-${coreFiles.length}): `);
+    const selection = await getNextLine();
+    const index = parseInt(selection || "1") - 1;
+    if (index >= 0 && index < coreFiles.length) {
+      selectedCore = coreFiles[index];
+    }
+  }
+
+  // Cancel the stdin reader before launching lldb
+  if (stdinReader) {
+    await stdinReader.cancel();
+    stdinReader = null;
+  }
+
+  // Launch debugger
+  const corePath = join(dir, selectedCore);
+  const debuggerPath = IS_GDB ? "gdb" : "lldb";
+  
+  console.log("\n🚀 Launching debugger:");
+  
+  let debuggerArgs: string[];
+  if (IS_GDB) {
+    // GDB syntax
+    debuggerArgs = [debuggerPath, bunExecutable, corePath];
+    console.log(`\n\x1b[1m${debuggerPath} ${bunExecutable} ${corePath}\x1b[0m`);
+    console.log("\n\x1b[90mUseful commands: bt | bt full | frame <n> | p <variable> | quit\x1b[0m\n");
+  } else {
+    // LLDB syntax
+    debuggerArgs = [debuggerPath, "--core", corePath, bunExecutable];
+    console.log(`\n\x1b[1m${debuggerPath} --core ${corePath} ${bunExecutable}\x1b[0m`);
+    console.log("\n\x1b[90mUseful commands: bt | bt all | frame select <n> | p <variable> | quit\x1b[0m\n");
+  }
+
+  const proc = await Bun.spawn(debuggerArgs, {
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  await proc.exited;
+  process.exit(proc.exitCode || 0);
+}
+
+// Original artifact download logic
 for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
   if (!isArtifactName(artifact.name)) {
     if (process.env.DEBUG) {
