@@ -631,6 +631,7 @@ if (IS_LLDB || IS_GDB) {
   let hasSelection = false;
 
   async function getNextLine(): Promise<string> {
+    if (hasSelection) return;
     if (!stdinReader) {
       stdinReader = Bun.stdin.stream().getReader();
     }
