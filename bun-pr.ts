@@ -417,6 +417,37 @@ const IS_GDB = (() => {
   }
 })();
 
+const BEFORE_N = (() => {
+  const beforeIndex = process.argv.findIndex((a) => a.startsWith("--before="));
+  if (beforeIndex !== -1) {
+    const value = process.argv[beforeIndex].split("=")[1];
+    process.argv.splice(beforeIndex, 1);
+    return parseInt(value, 10);
+  }
+  return null;
+})();
+
+const AFTER_N = (() => {
+  const afterIndex = process.argv.findIndex((a) => a.startsWith("--after="));
+  if (afterIndex !== -1) {
+    const value = process.argv[afterIndex].split("=")[1];
+    process.argv.splice(afterIndex, 1);
+    return parseInt(value, 10);
+  }
+  return null;
+})();
+
+const IS_RUN = (() => {
+  const runIndex = process.argv.findIndex((a) => a === "--run" || a === "-x");
+  if (runIndex !== -1) {
+    process.argv.splice(runIndex, 1);
+    return true;
+  }
+  return false;
+})();
+
+// We'll collect passthrough args later after we identify the PR/commit
+
 const octokit = new Octokit({
   auth: GITHUB_TOKEN,
 });
@@ -476,9 +507,216 @@ async function getCommitDetails(sha: string) {
   return commitData;
 }
 
+// Get the merge commit of a PR
+async function getMergeCommit(prNumber: number): Promise<{ sha: string; date: string } | null> {
+  const { data: pr } = await octokit.pulls.get({
+    owner: REPO_OWNER,
+    repo: REPO_NAME,
+    pull_number: prNumber,
+  });
+  
+  if (!pr.merged) {
+    return null;
+  }
+  
+  // The merge_commit_sha might not be in main's history if it was squashed/rebased
+  // So we'll also return the merge date to help find nearby commits
+  return {
+    sha: pr.merge_commit_sha,
+    date: pr.merged_at!
+  };
+}
+
+// Find a commit with build artifacts N commits before/after a given commit
+async function findCommitWithArtifacts(
+  fromCommit: string, 
+  mergeDate: string,
+  offset: number, 
+  direction: "before" | "after"
+): Promise<{ sha: string; distance: number; message: string } | null> {
+
+  // Fetch commits from main branch around the merge date
+  let allCommits: any[] = [];
+  
+  // We'll fetch commits in both directions from the merge date
+  // This handles cases where the merge commit itself isn't in the linear history
+  const fetchOptions: any = {
+    owner: REPO_OWNER,
+    repo: REPO_NAME,
+    sha: "main",
+    per_page: 100,
+  };
+  
+  // Fetch commits around the merge date
+  // We need commits both before and after to find the right position
+  const beforeOptions = { ...fetchOptions, until: mergeDate };
+  const afterOptions = { ...fetchOptions, since: mergeDate };
+  
+  // Fetch commits in parallel
+  const [beforeResponse, afterResponse] = await Promise.all([
+    octokit.repos.listCommits(beforeOptions),
+    octokit.repos.listCommits(afterOptions)
+  ]);
+  
+  // Combine them (after commits first, then before)
+  allCommits = [...afterResponse.data, ...beforeResponse.data];
+  
+  // Remove duplicates based on SHA
+  const seen = new Set<string>();
+  allCommits = allCommits.filter(c => {
+    if (seen.has(c.sha)) return false;
+    seen.add(c.sha);
+    return true;
+  });
+  
+  // Sort by date (newest first)
+  allCommits.sort((a, b) => 
+    new Date(b.commit.committer.date).getTime() - 
+    new Date(a.commit.committer.date).getTime()
+  );
+  
+  if (allCommits.length === 0) {
+    console.error(`No commits found around merge date ${mergeDate}`);
+    return null;
+  }
+  
+  // Find the closest commit to the merge date
+  const mergeTime = new Date(mergeDate).getTime();
+  let closestIndex = 0;
+  let closestDiff = Math.abs(new Date(allCommits[0].commit.committer.date).getTime() - mergeTime);
+  
+  for (let i = 1; i < allCommits.length; i++) {
+    const diff = Math.abs(new Date(allCommits[i].commit.committer.date).getTime() - mergeTime);
+    if (diff < closestDiff) {
+      closestDiff = diff;
+      closestIndex = i;
+    }
+  }
+  
+  if (!IS_RUN) {
+    console.log(`Using commit ${allCommits[closestIndex].sha.substring(0, 7)} (closest to merge time) as reference point`);
+  }
+  
+  // Calculate target index based on direction
+  const startIndex = closestIndex;
+  let targetIndex: number;
+  if (direction === "before") {
+    // Going backwards in time means higher index (older commits)
+    targetIndex = startIndex + offset;
+  } else {
+    // Going forward in time means lower index (newer commits)  
+    targetIndex = startIndex - offset;
+  }
+  
+  // Ensure target index is within bounds
+  if (targetIndex < 0) {
+    console.log(`Target is ${Math.abs(targetIndex)} commits into the future from the latest commit`);
+    targetIndex = 0;
+  } else if (targetIndex >= allCommits.length) {
+    console.log(`Target is beyond the ${allCommits.length} commits fetched`);
+    targetIndex = allCommits.length - 1;
+  }
+  
+  // Search for a commit with artifacts starting from target index
+  // We'll search outward from the target in both directions if needed
+  const searchDirection = direction === "before" ? 1 : -1;
+  let checkedCommits = 0;
+  let maxChecks = 30; // Check up to 30 commits for artifacts to avoid rate limits
+  
+  for (let distance = 0; distance < allCommits.length; distance++) {
+    // Try both directions from target
+    for (const tryDirection of distance === 0 ? [0] : [searchDirection, -searchDirection]) {
+      const i = targetIndex + (distance * tryDirection);
+      
+      // Skip if out of bounds
+      if (i < 0 || i >= allCommits.length) continue;
+      if (checkedCommits >= maxChecks) {
+        console.log(`Checked ${maxChecks} commits, stopping search`);
+        return null;
+      }
+      
+      const commit = allCommits[i];
+      checkedCommits++;
+      
+      if (!IS_RUN) {
+        process.stdout.write(`\rChecking commit ${commit.sha.substring(0, 7)} (${Math.abs(i - startIndex)} commits ${i > startIndex ? 'before' : i < startIndex ? 'after' : 'at'} merge)...`);
+      }
+      
+      // Check if this commit has buildkite artifacts
+      const { data: statuses } = await octokit.repos.listCommitStatusesForRef({
+        owner: REPO_OWNER,
+        repo: REPO_NAME,
+        ref: commit.sha,
+      });
+      
+      const buildkiteStatus = statuses.find(s => s.context === "buildkite/bun");
+      if (buildkiteStatus?.target_url) {
+        // Try to get artifacts for this build
+        let hasArtifacts = false;
+        for await (const artifact of getBuildArtifacts(buildkiteStatus.target_url)) {
+          if (artifact.filename.includes(".zip")) {
+            hasArtifacts = true;
+            break;
+          }
+        }
+        
+        if (hasArtifacts) {
+          const actualDistance = Math.abs(i - startIndex);
+          if (!IS_RUN) {
+            process.stdout.write("\n");
+          }
+          
+          // Get first line of commit message and truncate to 60 chars
+          const firstLine = commit.commit.message.split('\n')[0];
+          const truncatedMsg = firstLine.length > 60 
+            ? firstLine.substring(0, 57) + '...'
+            : firstLine;
+          
+          // Create clickable link for the commit
+          const commitUrl = `https://github.com/${REPO_OWNER}/${REPO_NAME}/commit/${commit.sha}`;
+          const clickableCommit = `\x1b]8;;${commitUrl}\x1b\\${commit.sha.substring(0, 7)}\x1b]8;;\x1b\\`;
+          
+          if (!IS_RUN) {
+            console.log(`✓ Found commit with artifacts: ${clickableCommit} (${actualDistance} commits ${i > startIndex ? 'before' : i < startIndex ? 'after' : 'at'} reference)`);
+            console.log(`  "${truncatedMsg}"`);
+          }
+          return { sha: commit.sha, distance: actualDistance, message: truncatedMsg };
+        }
+      }
+    }
+  }
+  
+  if (!IS_RUN) {
+    process.stdout.write("\n");
+  }
+  return null;
+}
+
 // Modify the PR_ID logic to handle commit hashes
-const PR_OR_COMMIT = await (async () => {
-  let last = process.argv.at(-1) || "";
+let PASSTHROUGH_ARGS: string[] = [];
+let PR_OR_COMMIT = await (async () => {
+  // Find the first non-flag argument that could be a PR/commit
+  let target: string | undefined;
+  let targetIndex = -1;
+  
+  for (let i = 2; i < process.argv.length; i++) {
+    const arg = process.argv[i];
+    // Skip if it's a flag (but not negative numbers)
+    if (arg.startsWith("-") && isNaN(Number(arg))) continue;
+    // This should be our PR/commit/branch
+    target = arg;
+    targetIndex = i;
+    break;
+  }
+  
+  // If we're in --run mode, everything after the target is a passthrough arg
+  if (IS_RUN && targetIndex !== -1 && targetIndex < process.argv.length - 1) {
+    PASSTHROUGH_ARGS = process.argv.slice(targetIndex + 1);
+    // Remove passthrough args from process.argv
+    process.argv = process.argv.slice(0, targetIndex + 1);
+  }
+  
+  let last = target || process.argv.at(-1) || "";
 
   if (last === "." || last === import.meta.path) {
     const currentBranchName = (
@@ -564,22 +802,70 @@ const PR_OR_COMMIT = await (async () => {
   }
 })();
 
-// Update console log to show whether we're searching for a PR or commit
-if (!IS_LLDB && !IS_GDB) {
-  console.log(
-    "Searching GitHub for artifact",
-    ARTIFACT_NAME,
-    `from ${PR_OR_COMMIT.type === "pr" ? "PR #" : "commit"} ${
-      PR_OR_COMMIT.value
-    }...`
-  );
-}
-
 const OUT_DIR =
   process.env.BUN_OUT_DIR ||
   (Bun.which("bun")
     ? dirname(Bun.which("bun"))
     : process.env.BUN_INSTALL || ".");
+
+// Helper function to get expected executable name
+function getExecutableName(prOrCommit: { type: string; value: string }): string {
+  const baseName = IS_PROFILE ? "bun-profile" : IS_ASAN ? "bun-asan" : "bun";
+  const extension = process.platform === "win32" ? ".exe" : "";
+  
+  if (prOrCommit.type === "pr") {
+    return `${baseName}-${prOrCommit.value}${extension}`;
+  } else {
+    // For commits, use the full SHA
+    return `${baseName}-${prOrCommit.value}${extension}`;
+  }
+}
+
+// Check if executable already exists when using --run
+async function checkAndRunExisting(): Promise<boolean> {
+  if (!IS_RUN) return false;
+  
+  const execName = getExecutableName(PR_OR_COMMIT);
+  
+  // Try to find it in PATH using Bun.which
+  const execInPath = Bun.which(execName);
+  if (execInPath) {
+    // Execute it with passthrough args in the original cwd
+    const proc = Bun.spawn([execInPath, ...PASSTHROUGH_ARGS], {
+      stdin: "inherit",
+      stdout: "inherit", 
+      stderr: "inherit",
+      cwd: originalCwd,
+    });
+    
+    await proc.exited;
+    process.exit(proc.exitCode || 0);
+  }
+  
+  // Also check the explicit path in OUT_DIR
+  const execPath = join(OUT_DIR, execName);
+  try {
+    const file = Bun.file(execPath);
+    if (await file.exists()) {
+      // Execute it with passthrough args in the original cwd
+      const proc = Bun.spawn([execPath, ...PASSTHROUGH_ARGS], {
+        stdin: "inherit",
+        stdout: "inherit", 
+        stderr: "inherit",
+        cwd: originalCwd,
+      });
+      
+      await proc.exited;
+      process.exit(proc.exitCode || 0);
+    }
+  } catch (e) {
+    // File doesn't exist, continue to download
+  }
+  
+  return false;
+}
+
+// Don't check for existing executable early if we need to resolve --before/--after first
 
 // Modify the main download loop
 type PRData = { statuses_url: string; head: { sha: string } };
@@ -588,6 +874,107 @@ type CommitData = { url: string; sha: string };
 let statusesUrl: string;
 let prData: PRData | undefined;
 let commitData: CommitData | undefined;
+let targetCommit: string | null = null;
+let originalPRNumber: string | null = null;
+let commitDistance: number | null = null;
+let commitMessage: string | null = null;
+
+// Handle --before and --after flags
+if (BEFORE_N !== null || AFTER_N !== null) {
+  let referenceCommit: string;
+  let referenceDate: string;
+  
+  if (PR_OR_COMMIT.type === "pr") {
+    originalPRNumber = PR_OR_COMMIT.value;
+    
+    // Get the merge commit of the PR
+    const mergeInfo = await getMergeCommit(Number(PR_OR_COMMIT.value));
+    if (!mergeInfo) {
+      throw new Error(`PR #${PR_OR_COMMIT.value} is not merged yet`);
+    }
+    
+    if (!IS_RUN) {
+      console.log(`PR #${PR_OR_COMMIT.value} was merged as commit ${mergeInfo.sha.substring(0, 7)}`);
+    }
+    referenceCommit = mergeInfo.sha;
+    referenceDate = mergeInfo.date;
+  } else {
+    // For commits or branches, get the commit details
+    const commitDetails = await getCommitDetails(PR_OR_COMMIT.value);
+    if (!commitDetails) {
+      throw new Error(`Could not find commit ${PR_OR_COMMIT.value}`);
+    }
+    
+    referenceCommit = commitDetails.sha;
+    referenceDate = commitDetails.commit.committer?.date || commitDetails.commit.author?.date;
+    
+    if (!referenceDate) {
+      throw new Error(`Could not get date for commit ${referenceCommit}`);
+    }
+    
+    if (!IS_RUN) {
+      console.log(`Using commit ${referenceCommit.substring(0, 7)} as reference`);
+    }
+  }
+  
+  // Find a commit with artifacts before or after the reference
+  const direction = BEFORE_N !== null ? "before" : "after";
+  const offset = BEFORE_N !== null ? BEFORE_N : AFTER_N!;
+  
+  if (!IS_RUN) {
+    console.log(`\nSearching for a commit with artifacts around ${offset} commits ${direction} the reference...`);
+  }
+  const result = await findCommitWithArtifacts(referenceCommit, referenceDate, offset, direction);
+  
+  if (!result) {
+    const refDescription = originalPRNumber ? `PR #${originalPRNumber}` : `commit ${referenceCommit.substring(0, 7)}`;
+    throw new Error(`Could not find a commit with artifacts around ${offset} commits ${direction} ${refDescription}`);
+  }
+  
+  targetCommit = result.sha;
+  commitDistance = result.distance;
+  commitMessage = result.message;
+  
+  // Override PR_OR_COMMIT to use the found commit
+  PR_OR_COMMIT.type = "commit";
+  PR_OR_COMMIT.value = targetCommit;
+  
+  // Check if we already have this specific commit's binary
+  if (IS_RUN) {
+    await checkAndRunExisting();
+  }
+} else if (IS_RUN) {
+  // No --before/--after, check for existing executable with original PR/commit
+  await checkAndRunExisting();
+}
+
+// Update console log to show whether we're searching for a PR or commit
+if (!IS_LLDB && !IS_GDB && !IS_RUN) {
+  if (targetCommit) {
+    const direction = BEFORE_N !== null ? "before" : "after";
+    const commitUrl = `https://github.com/${REPO_OWNER}/${REPO_NAME}/commit/${targetCommit}`;
+    const clickableCommit = `\x1b]8;;${commitUrl}\x1b\\${targetCommit.substring(0, 7)}\x1b]8;;\x1b\\`;
+    
+    const refDescription = originalPRNumber 
+      ? `(${commitDistance} commits ${direction} PR #${originalPRNumber}'s merge)`
+      : `(${commitDistance} commits ${direction} reference)`;
+    
+    console.log(
+      "\nSearching GitHub for artifact",
+      ARTIFACT_NAME,
+      `from commit ${clickableCommit} ${refDescription}`
+    );
+    console.log(`  "${commitMessage}"`);
+  } else {
+    console.log(
+      "Searching GitHub for artifact",
+      ARTIFACT_NAME,
+      `from ${PR_OR_COMMIT.type === "pr" ? "PR #" : "commit"} ${
+        PR_OR_COMMIT.value
+      }...`
+    );
+  }
+}
 
 if (PR_OR_COMMIT.type === "pr") {
   // Get PR details to find the head commit SHA
@@ -999,29 +1386,33 @@ for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
     continue;
   }
 
-  console.log("Found artifact", artifact.name);
-  console.log(
-    "Choosing artifact from run that started",
-    new Intl.DateTimeFormat(undefined, {
-      timeStyle: "medium",
-      dateStyle: "medium",
-      formatMatcher: "best fit",
-    }).format(artifact.createdAt)
-  );
+  if (!IS_RUN) {
+    console.log("Found artifact", artifact.name);
+    console.log(
+      "Choosing artifact from run that started",
+      new Intl.DateTimeFormat(undefined, {
+        timeStyle: "medium",
+        dateStyle: "medium",
+        formatMatcher: "best fit",
+      }).format(artifact.createdAt)
+    );
+  }
 
   const response = await fetch(artifact.url);
   if (!response.ok) {
     throw new Error(`Failed to download artifact: ${response.statusText}`);
   }
 
-  console.log(
-    "Downloading",
-    JSON.stringify(ARTIFACT_NAME),
-    `from ${PR_OR_COMMIT.type === "pr" ? "PR #" : "commit"} ${
-      PR_OR_COMMIT.value
-    }`,
-    "\n-> " + artifact.url + "\n"
-  );
+  if (!IS_RUN) {
+    console.log(
+      "Downloading",
+      JSON.stringify(ARTIFACT_NAME),
+      `from ${PR_OR_COMMIT.type === "pr" ? "PR #" : "commit"} ${
+        PR_OR_COMMIT.value
+      }`,
+      "\n-> " + artifact.url + "\n"
+    );
+  }
 
   const blob = await response.blob();
   const filename = `${ARTIFACT_NAME}-${PR_OR_COMMIT.type}-${PR_OR_COMMIT.value}-${artifact.shasum}.zip`;
@@ -1060,9 +1451,13 @@ for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
           recursive: true,
           force: true,
         });
-        console.log(`Copied debugging symbols to:\n  ${dsymDest}`);
+        if (!IS_RUN) {
+          console.log(`Copied debugging symbols to:\n  ${dsymDest}`);
+        }
       } catch (e) {
-        console.debug(`No .dSYM file found or failed to copy: ${e}`);
+        if (!IS_RUN) {
+          console.debug(`No .dSYM file found or failed to copy: ${e}`);
+        }
       }
     }
 
@@ -1078,20 +1473,35 @@ for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
       `${OUT_DIR}/${inFolderWithoutExtension}-latest${extension}`,
       "file"
     );
-    console.write(
-      "Downloaded to:" +
-        "\n\n" +
-        `\x1b[1m\x1b[32m${OUT_DIR}${sep}${fullName}\x1b[0m` +
-        "\n\n" +
-        "To run the downloaded executable, use any of the following following commands:" +
-        "\n\n" +
-        `\x1b[1m\x1b[32m${fullName.replaceAll(
-          ".exe",
-          ""
-        )}${extension}\x1b[0m\n` +
-        `\x1b[1m\x1b[32m${inFolderWithoutExtension}-${PR_OR_COMMIT.value}${extension}\x1b[0m\n` +
-        `\x1b[1m\x1b[32m${inFolderWithoutExtension}-latest${extension}\x1b[0m\n`
-    );
+    
+    if (IS_RUN) {
+      // Execute the downloaded binary with passthrough args in the original cwd
+      const execPath = `${OUT_DIR}/${inFolderWithoutExtension}-${PR_OR_COMMIT.value}${extension}`;
+      const proc = Bun.spawn([execPath, ...PASSTHROUGH_ARGS], {
+        stdin: "inherit",
+        stdout: "inherit",
+        stderr: "inherit",
+        cwd: originalCwd,
+      });
+      
+      await proc.exited;
+      process.exit(proc.exitCode || 0);
+    } else {
+      console.write(
+        "Downloaded to:" +
+          "\n\n" +
+          `\x1b[1m\x1b[32m${OUT_DIR}${sep}${fullName}\x1b[0m` +
+          "\n\n" +
+          "To run the downloaded executable, use any of the following following commands:" +
+          "\n\n" +
+          `\x1b[1m\x1b[32m${fullName.replaceAll(
+            ".exe",
+            ""
+          )}${extension}\x1b[0m\n` +
+          `\x1b[1m\x1b[32m${inFolderWithoutExtension}-${PR_OR_COMMIT.value}${extension}\x1b[0m\n` +
+          `\x1b[1m\x1b[32m${inFolderWithoutExtension}-latest${extension}\x1b[0m\n`
+      );
+    }
   } else {
     console.log("No executable found in the artifact folder.", files);
   }
