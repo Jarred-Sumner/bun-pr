@@ -397,6 +397,16 @@ const IS_BASELINE = (() => {
   }
 })();
 
+const IS_MUSL = (() => {
+  const muslIndex = process.argv.findIndex((a) => a === "--musl");
+  if (muslIndex !== -1) {
+    process.argv.splice(muslIndex, 1);
+    return true;
+  } else {
+    return false;
+  }
+})();
+
 const IS_LLDB = (() => {
   const lldbIndex = process.argv.findIndex((a) => a === "--lldb");
   if (lldbIndex !== -1) {
@@ -466,6 +476,13 @@ const ARTIFACT_NAME = (() => {
     basename += "-x64";
   } else if (process.arch === "arm64") {
     basename += "-aarch64";
+  }
+
+  if (IS_MUSL) {
+    if (process.platform !== "linux") {
+      throw new Error("--musl is only supported on Linux");
+    }
+    basename += "-musl";
   }
 
   if (IS_BASELINE) {
