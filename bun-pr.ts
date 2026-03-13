@@ -30,8 +30,7 @@ async function fetch(url: string, options: RequestInit) {
 
 let GITHUB_TOKEN = "";
 try {
-  GITHUB_TOKEN =
-    process.env.GITHUB_TOKEN || (await $`gh auth token`.text()).trim(); // Replace with your GitHub token
+  GITHUB_TOKEN = process.env.GITHUB_TOKEN || (await $`gh auth token`.text()).trim(); // Replace with your GitHub token
 } catch (e) {}
 
 const REPO_OWNER = process.env.BUN_REPO_OWNER || "oven-sh"; // Replace with the repository owner
@@ -166,9 +165,7 @@ async function* getBuildkitePipelineUrl(buildkiteUrl: string) {
     context: string;
     target_url: string;
   }>;
-  yield* statuses
-    .filter((status) => status.context === "buildkite/bun")
-    .map((status) => status.target_url);
+  yield* statuses.filter(status => status.context === "buildkite/bun").map(status => status.target_url);
 }
 
 async function* getPRCommits(prNumber: number) {
@@ -180,9 +177,7 @@ async function* getPRCommits(prNumber: number) {
   });
 
   commits.sort(
-    (a, b) =>
-      new Date(b.commit?.author?.date || "").getTime() -
-      new Date(a.commit?.author?.date || "").getTime()
+    (a, b) => new Date(b.commit?.author?.date || "").getTime() - new Date(a.commit?.author?.date || "").getTime(),
   );
 
   // Start with newest commits
@@ -194,11 +189,8 @@ async function* getPRCommits(prNumber: number) {
     });
 
     const buildkiteStatuses = statuses
-      .filter((status) => status.context.includes("buildkite"))
-      .sort(
-        (a, b) =>
-          new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-      );
+      .filter(status => status.context.includes("buildkite"))
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
     for (const status of buildkiteStatuses) {
       if (status.target_url) {
@@ -208,10 +200,7 @@ async function* getPRCommits(prNumber: number) {
   }
 }
 
-async function* getBuildArtifacts(
-  buildkiteUrl: string,
-  options?: { includeAllJobs?: boolean }
-) {
+async function* getBuildArtifacts(buildkiteUrl: string, options?: { includeAllJobs?: boolean }) {
   let buildkiteID = buildkiteUrl.split("/").at(-1);
 
   if (!buildkiteID) {
@@ -227,9 +216,7 @@ async function* getBuildArtifacts(
   const response = await fetch(pipelineUrl);
 
   if (!response.ok) {
-    console.debug(
-      `Build ${buildkiteID} not accessible: ${response.statusText}`
-    );
+    console.debug(`Build ${buildkiteID} not accessible: ${response.statusText}`);
     return;
   }
 
@@ -249,16 +236,29 @@ async function* getBuildArtifacts(
     result.state !== "canceled" &&
     result.state !== "started"
   ) {
-    console.debug(
-      `Build ${buildkiteID} is in state: ${result.state}, ignoring...`
-    );
+    console.debug(`Build ${buildkiteID} is in state: ${result.state}, ignoring...`);
     return;
   }
 
   let jobs = result.jobs;
 
+  // BuildKite's frontend API stopped inlining jobs in the build .json response
+  // around March 2026. Fall back to the paginated /data/jobs endpoint.
+  if (!jobs?.length) {
+    const jobsUrl = `https://buildkite.com/bun/bun/builds/${buildkiteID}/data/jobs`;
+    const jobsResponse = await fetch(jobsUrl);
+    if (jobsResponse.ok) {
+      try {
+        const data = (await jobsResponse.json()) as { records: Job[] };
+        jobs = data.records ?? [];
+      } catch (e) {
+        console.debug(`Failed to parse jobs for ${buildkiteID}: ${e}`);
+      }
+    }
+  }
+
   if (!options?.includeAllJobs) {
-    jobs = result.jobs.filter((job) => {
+    jobs = jobs.filter(job => {
       if (IS_LLDB || IS_GDB) {
         return job.step_key?.includes?.("test-bun");
       }
@@ -266,9 +266,7 @@ async function* getBuildArtifacts(
     });
 
     if (!jobs.length) {
-      console.debug(
-        `Build ${buildkiteID} has no ${IS_LLDB || IS_GDB ? "test-bun" : "build-bun"} jobs`
-      );
+      console.debug(`Build ${buildkiteID} has no ${IS_LLDB || IS_GDB ? "test-bun" : "build-bun"} jobs`);
       return;
     }
   }
@@ -287,9 +285,7 @@ async function* getBuildArtifacts(
       const artifactsResponse = await fetch(artifactsUrl.toString());
 
       if (!artifactsResponse.ok) {
-        console.debug(
-          `Failed to fetch artifacts for build ${buildkiteID}: ${artifactsResponse.statusText}`
-        );
+        console.debug(`Failed to fetch artifacts for build ${buildkiteID}: ${artifactsResponse.statusText}`);
         continue;
       }
 
@@ -306,11 +302,7 @@ async function* getBuildArtifacts(
         if (!options?.includeAllJobs) {
           if (IS_LLDB || IS_GDB) {
             // Look for core dump artifacts
-            if (
-              !artifact.file_name.includes(".tar.gz.age") &&
-              !artifact.file_name.includes(".cores")
-            )
-              continue;
+            if (!artifact.file_name.includes(".tar.gz.age") && !artifact.file_name.includes(".cores")) continue;
           } else {
             if (!artifact.file_name.includes(".zip")) continue;
           }
@@ -326,9 +318,7 @@ async function* getBuildArtifacts(
           yield {
             url: fullUrl.toString(),
             filename: artifact.file_name,
-            name: artifact.file_name
-              .replace(".zip", "")
-              .replace(".tar.gz.age", ""),
+            name: artifact.file_name.replace(".zip", "").replace(".tar.gz.age", ""),
             createdAt: createdAt,
             elapsed: finishedAt.getTime() - createdAt.getTime(),
             shasum: artifact.sha1sum,
@@ -370,7 +360,7 @@ export async function* getBuildArtifactUrls(githubPRUrl: string) {
 }
 
 const IS_ASAN = (() => {
-  const asanIndex = process.argv.findIndex((a) => a === "--asan");
+  const asanIndex = process.argv.findIndex(a => a === "--asan");
   if (asanIndex !== -1) {
     process.argv.splice(asanIndex, 1);
     return true;
@@ -378,7 +368,7 @@ const IS_ASAN = (() => {
 })();
 
 const IS_PROFILE = (() => {
-  const profileIndex = process.argv.findIndex((a) => a === "--profile");
+  const profileIndex = process.argv.findIndex(a => a === "--profile");
   if (profileIndex !== -1) {
     process.argv.splice(profileIndex, 1);
     return true;
@@ -388,7 +378,7 @@ const IS_PROFILE = (() => {
 })();
 
 const IS_BASELINE = (() => {
-  const profileIndex = process.argv.findIndex((a) => a === "--baseline");
+  const profileIndex = process.argv.findIndex(a => a === "--baseline");
   if (profileIndex !== -1) {
     process.argv.splice(profileIndex, 1);
     return true;
@@ -398,7 +388,7 @@ const IS_BASELINE = (() => {
 })();
 
 const IS_MUSL = (() => {
-  const muslIndex = process.argv.findIndex((a) => a === "--musl");
+  const muslIndex = process.argv.findIndex(a => a === "--musl");
   if (muslIndex !== -1) {
     process.argv.splice(muslIndex, 1);
     return true;
@@ -408,7 +398,7 @@ const IS_MUSL = (() => {
 })();
 
 const IS_LLDB = (() => {
-  const lldbIndex = process.argv.findIndex((a) => a === "--lldb");
+  const lldbIndex = process.argv.findIndex(a => a === "--lldb");
   if (lldbIndex !== -1) {
     process.argv.splice(lldbIndex, 1);
     return true;
@@ -418,7 +408,7 @@ const IS_LLDB = (() => {
 })();
 
 const IS_GDB = (() => {
-  const gdbIndex = process.argv.findIndex((a) => a === "--gdb");
+  const gdbIndex = process.argv.findIndex(a => a === "--gdb");
   if (gdbIndex !== -1) {
     process.argv.splice(gdbIndex, 1);
     return true;
@@ -428,7 +418,7 @@ const IS_GDB = (() => {
 })();
 
 const BEFORE_N = (() => {
-  const beforeIndex = process.argv.findIndex((a) => a.startsWith("--before="));
+  const beforeIndex = process.argv.findIndex(a => a.startsWith("--before="));
   if (beforeIndex !== -1) {
     const value = process.argv[beforeIndex].split("=")[1];
     process.argv.splice(beforeIndex, 1);
@@ -438,7 +428,7 @@ const BEFORE_N = (() => {
 })();
 
 const AFTER_N = (() => {
-  const afterIndex = process.argv.findIndex((a) => a.startsWith("--after="));
+  const afterIndex = process.argv.findIndex(a => a.startsWith("--after="));
   if (afterIndex !== -1) {
     const value = process.argv[afterIndex].split("=")[1];
     process.argv.splice(afterIndex, 1);
@@ -448,7 +438,7 @@ const AFTER_N = (() => {
 })();
 
 const IS_RUN = (() => {
-  const runIndex = process.argv.findIndex((a) => a === "--run" || a === "-x");
+  const runIndex = process.argv.findIndex(a => a === "--run" || a === "-x");
   if (runIndex !== -1) {
     process.argv.splice(runIndex, 1);
     return true;
@@ -531,30 +521,29 @@ async function getMergeCommit(prNumber: number): Promise<{ sha: string; date: st
     repo: REPO_NAME,
     pull_number: prNumber,
   });
-  
+
   if (!pr.merged) {
     return null;
   }
-  
+
   // The merge_commit_sha might not be in main's history if it was squashed/rebased
   // So we'll also return the merge date to help find nearby commits
   return {
     sha: pr.merge_commit_sha,
-    date: pr.merged_at!
+    date: pr.merged_at!,
   };
 }
 
 // Find a commit with build artifacts N commits before/after a given commit
 async function findCommitWithArtifacts(
-  fromCommit: string, 
+  fromCommit: string,
   mergeDate: string,
-  offset: number, 
-  direction: "before" | "after"
+  offset: number,
+  direction: "before" | "after",
 ): Promise<{ sha: string; distance: number; message: string } | null> {
-
   // Fetch commits from main branch around the merge date
   let allCommits: any[] = [];
-  
+
   // We'll fetch commits in both directions from the merge date
   // This handles cases where the merge commit itself isn't in the linear history
   const fetchOptions: any = {
@@ -563,21 +552,21 @@ async function findCommitWithArtifacts(
     sha: "main",
     per_page: 100,
   };
-  
+
   // Fetch commits around the merge date
   // We need commits both before and after to find the right position
   const beforeOptions = { ...fetchOptions, until: mergeDate };
   const afterOptions = { ...fetchOptions, since: mergeDate };
-  
+
   // Fetch commits in parallel
   const [beforeResponse, afterResponse] = await Promise.all([
     octokit.repos.listCommits(beforeOptions),
-    octokit.repos.listCommits(afterOptions)
+    octokit.repos.listCommits(afterOptions),
   ]);
-  
+
   // Combine them (after commits first, then before)
   allCommits = [...afterResponse.data, ...beforeResponse.data];
-  
+
   // Remove duplicates based on SHA
   const seen = new Set<string>();
   allCommits = allCommits.filter(c => {
@@ -585,23 +574,20 @@ async function findCommitWithArtifacts(
     seen.add(c.sha);
     return true;
   });
-  
+
   // Sort by date (newest first)
-  allCommits.sort((a, b) => 
-    new Date(b.commit.committer.date).getTime() - 
-    new Date(a.commit.committer.date).getTime()
-  );
-  
+  allCommits.sort((a, b) => new Date(b.commit.committer.date).getTime() - new Date(a.commit.committer.date).getTime());
+
   if (allCommits.length === 0) {
     console.error(`No commits found around merge date ${mergeDate}`);
     return null;
   }
-  
+
   // Find the closest commit to the merge date
   const mergeTime = new Date(mergeDate).getTime();
   let closestIndex = 0;
   let closestDiff = Math.abs(new Date(allCommits[0].commit.committer.date).getTime() - mergeTime);
-  
+
   for (let i = 1; i < allCommits.length; i++) {
     const diff = Math.abs(new Date(allCommits[i].commit.committer.date).getTime() - mergeTime);
     if (diff < closestDiff) {
@@ -609,11 +595,13 @@ async function findCommitWithArtifacts(
       closestIndex = i;
     }
   }
-  
+
   if (!IS_RUN) {
-    console.log(`Using commit ${allCommits[closestIndex].sha.substring(0, 7)} (closest to merge time) as reference point`);
+    console.log(
+      `Using commit ${allCommits[closestIndex].sha.substring(0, 7)} (closest to merge time) as reference point`,
+    );
   }
-  
+
   // Calculate target index based on direction
   const startIndex = closestIndex;
   let targetIndex: number;
@@ -621,10 +609,10 @@ async function findCommitWithArtifacts(
     // Going backwards in time means higher index (older commits)
     targetIndex = startIndex + offset;
   } else {
-    // Going forward in time means lower index (newer commits)  
+    // Going forward in time means lower index (newer commits)
     targetIndex = startIndex - offset;
   }
-  
+
   // Ensure target index is within bounds
   if (targetIndex < 0) {
     console.log(`Target is ${Math.abs(targetIndex)} commits into the future from the latest commit`);
@@ -633,39 +621,41 @@ async function findCommitWithArtifacts(
     console.log(`Target is beyond the ${allCommits.length} commits fetched`);
     targetIndex = allCommits.length - 1;
   }
-  
+
   // Search for a commit with artifacts starting from target index
   // We'll search outward from the target in both directions if needed
   const searchDirection = direction === "before" ? 1 : -1;
   let checkedCommits = 0;
   let maxChecks = 30; // Check up to 30 commits for artifacts to avoid rate limits
-  
+
   for (let distance = 0; distance < allCommits.length; distance++) {
     // Try both directions from target
     for (const tryDirection of distance === 0 ? [0] : [searchDirection, -searchDirection]) {
-      const i = targetIndex + (distance * tryDirection);
-      
+      const i = targetIndex + distance * tryDirection;
+
       // Skip if out of bounds
       if (i < 0 || i >= allCommits.length) continue;
       if (checkedCommits >= maxChecks) {
         console.log(`Checked ${maxChecks} commits, stopping search`);
         return null;
       }
-      
+
       const commit = allCommits[i];
       checkedCommits++;
-      
+
       if (!IS_RUN) {
-        process.stdout.write(`\rChecking commit ${commit.sha.substring(0, 7)} (${Math.abs(i - startIndex)} commits ${i > startIndex ? 'before' : i < startIndex ? 'after' : 'at'} merge)...`);
+        process.stdout.write(
+          `\rChecking commit ${commit.sha.substring(0, 7)} (${Math.abs(i - startIndex)} commits ${i > startIndex ? "before" : i < startIndex ? "after" : "at"} merge)...`,
+        );
       }
-      
+
       // Check if this commit has buildkite artifacts
       const { data: statuses } = await octokit.repos.listCommitStatusesForRef({
         owner: REPO_OWNER,
         repo: REPO_NAME,
         ref: commit.sha,
       });
-      
+
       const buildkiteStatus = statuses.find(s => s.context === "buildkite/bun");
       if (buildkiteStatus?.target_url) {
         // Try to get artifacts for this build
@@ -676,25 +666,25 @@ async function findCommitWithArtifacts(
             break;
           }
         }
-        
+
         if (hasArtifacts) {
           const actualDistance = Math.abs(i - startIndex);
           if (!IS_RUN) {
             process.stdout.write("\n");
           }
-          
+
           // Get first line of commit message and truncate to 60 chars
-          const firstLine = commit.commit.message.split('\n')[0];
-          const truncatedMsg = firstLine.length > 60 
-            ? firstLine.substring(0, 57) + '...'
-            : firstLine;
-          
+          const firstLine = commit.commit.message.split("\n")[0];
+          const truncatedMsg = firstLine.length > 60 ? firstLine.substring(0, 57) + "..." : firstLine;
+
           // Create clickable link for the commit
           const commitUrl = `https://github.com/${REPO_OWNER}/${REPO_NAME}/commit/${commit.sha}`;
           const clickableCommit = `\x1b]8;;${commitUrl}\x1b\\${commit.sha.substring(0, 7)}\x1b]8;;\x1b\\`;
-          
+
           if (!IS_RUN) {
-            console.log(`✓ Found commit with artifacts: ${clickableCommit} (${actualDistance} commits ${i > startIndex ? 'before' : i < startIndex ? 'after' : 'at'} reference)`);
+            console.log(
+              `✓ Found commit with artifacts: ${clickableCommit} (${actualDistance} commits ${i > startIndex ? "before" : i < startIndex ? "after" : "at"} reference)`,
+            );
             console.log(`  "${truncatedMsg}"`);
           }
           return { sha: commit.sha, distance: actualDistance, message: truncatedMsg };
@@ -702,7 +692,7 @@ async function findCommitWithArtifacts(
       }
     }
   }
-  
+
   if (!IS_RUN) {
     process.stdout.write("\n");
   }
@@ -715,7 +705,7 @@ let PR_OR_COMMIT = await (async () => {
   // Find the first non-flag argument that could be a PR/commit
   let target: string | undefined;
   let targetIndex = -1;
-  
+
   for (let i = 2; i < process.argv.length; i++) {
     const arg = process.argv[i];
     // Skip if it's a flag (but not negative numbers)
@@ -725,20 +715,18 @@ let PR_OR_COMMIT = await (async () => {
     targetIndex = i;
     break;
   }
-  
+
   // If we're in --run mode, everything after the target is a passthrough arg
   if (IS_RUN && targetIndex !== -1 && targetIndex < process.argv.length - 1) {
     PASSTHROUGH_ARGS = process.argv.slice(targetIndex + 1);
     // Remove passthrough args from process.argv
     process.argv = process.argv.slice(0, targetIndex + 1);
   }
-  
+
   let last = target || process.argv.at(-1) || "";
 
   if (last === "." || last === import.meta.path) {
-    const currentBranchName = (
-      await $`git rev-parse --abbrev-ref HEAD`.cwd(originalCwd).text()
-    ).trim();
+    const currentBranchName = (await $`git rev-parse --abbrev-ref HEAD`.cwd(originalCwd).text()).trim();
     $.cwd(cwd);
     if (currentBranchName === "main" || currentBranchName === "master") {
       // return the most recent commit
@@ -820,16 +808,13 @@ let PR_OR_COMMIT = await (async () => {
 })();
 
 const OUT_DIR =
-  process.env.BUN_OUT_DIR ||
-  (Bun.which("bun")
-    ? dirname(Bun.which("bun"))
-    : process.env.BUN_INSTALL || ".");
+  process.env.BUN_OUT_DIR || (Bun.which("bun") ? dirname(Bun.which("bun")) : process.env.BUN_INSTALL || ".");
 
 // Helper function to get expected executable name
 function getExecutableName(prOrCommit: { type: string; value: string }): string {
   const baseName = IS_PROFILE ? "bun-profile" : IS_ASAN ? "bun-asan" : "bun";
   const extension = process.platform === "win32" ? ".exe" : "";
-  
+
   if (prOrCommit.type === "pr") {
     return `${baseName}-${prOrCommit.value}${extension}`;
   } else {
@@ -841,24 +826,24 @@ function getExecutableName(prOrCommit: { type: string; value: string }): string 
 // Check if executable already exists when using --run
 async function checkAndRunExisting(): Promise<boolean> {
   if (!IS_RUN) return false;
-  
+
   const execName = getExecutableName(PR_OR_COMMIT);
-  
+
   // Try to find it in PATH using Bun.which
   const execInPath = Bun.which(execName);
   if (execInPath) {
     // Execute it with passthrough args in the original cwd
     const proc = Bun.spawn([execInPath, ...PASSTHROUGH_ARGS], {
       stdin: "inherit",
-      stdout: "inherit", 
+      stdout: "inherit",
       stderr: "inherit",
       cwd: originalCwd,
     });
-    
+
     await proc.exited;
     process.exit(proc.exitCode || 0);
   }
-  
+
   // Also check the explicit path in OUT_DIR
   const execPath = join(OUT_DIR, execName);
   try {
@@ -867,18 +852,18 @@ async function checkAndRunExisting(): Promise<boolean> {
       // Execute it with passthrough args in the original cwd
       const proc = Bun.spawn([execPath, ...PASSTHROUGH_ARGS], {
         stdin: "inherit",
-        stdout: "inherit", 
+        stdout: "inherit",
         stderr: "inherit",
         cwd: originalCwd,
       });
-      
+
       await proc.exited;
       process.exit(proc.exitCode || 0);
     }
   } catch (e) {
     // File doesn't exist, continue to download
   }
-  
+
   return false;
 }
 
@@ -900,16 +885,16 @@ let commitMessage: string | null = null;
 if (BEFORE_N !== null || AFTER_N !== null) {
   let referenceCommit: string;
   let referenceDate: string;
-  
+
   if (PR_OR_COMMIT.type === "pr") {
     originalPRNumber = PR_OR_COMMIT.value;
-    
+
     // Get the merge commit of the PR
     const mergeInfo = await getMergeCommit(Number(PR_OR_COMMIT.value));
     if (!mergeInfo) {
       throw new Error(`PR #${PR_OR_COMMIT.value} is not merged yet`);
     }
-    
+
     if (!IS_RUN) {
       console.log(`PR #${PR_OR_COMMIT.value} was merged as commit ${mergeInfo.sha.substring(0, 7)}`);
     }
@@ -921,41 +906,41 @@ if (BEFORE_N !== null || AFTER_N !== null) {
     if (!commitDetails) {
       throw new Error(`Could not find commit ${PR_OR_COMMIT.value}`);
     }
-    
+
     referenceCommit = commitDetails.sha;
     referenceDate = commitDetails.commit.committer?.date || commitDetails.commit.author?.date;
-    
+
     if (!referenceDate) {
       throw new Error(`Could not get date for commit ${referenceCommit}`);
     }
-    
+
     if (!IS_RUN) {
       console.log(`Using commit ${referenceCommit.substring(0, 7)} as reference`);
     }
   }
-  
+
   // Find a commit with artifacts before or after the reference
   const direction = BEFORE_N !== null ? "before" : "after";
   const offset = BEFORE_N !== null ? BEFORE_N : AFTER_N!;
-  
+
   if (!IS_RUN) {
     console.log(`\nSearching for a commit with artifacts around ${offset} commits ${direction} the reference...`);
   }
   const result = await findCommitWithArtifacts(referenceCommit, referenceDate, offset, direction);
-  
+
   if (!result) {
     const refDescription = originalPRNumber ? `PR #${originalPRNumber}` : `commit ${referenceCommit.substring(0, 7)}`;
     throw new Error(`Could not find a commit with artifacts around ${offset} commits ${direction} ${refDescription}`);
   }
-  
+
   targetCommit = result.sha;
   commitDistance = result.distance;
   commitMessage = result.message;
-  
+
   // Override PR_OR_COMMIT to use the found commit
   PR_OR_COMMIT.type = "commit";
   PR_OR_COMMIT.value = targetCommit;
-  
+
   // Check if we already have this specific commit's binary
   if (IS_RUN) {
     await checkAndRunExisting();
@@ -971,24 +956,18 @@ if (!IS_LLDB && !IS_GDB && !IS_RUN) {
     const direction = BEFORE_N !== null ? "before" : "after";
     const commitUrl = `https://github.com/${REPO_OWNER}/${REPO_NAME}/commit/${targetCommit}`;
     const clickableCommit = `\x1b]8;;${commitUrl}\x1b\\${targetCommit.substring(0, 7)}\x1b]8;;\x1b\\`;
-    
-    const refDescription = originalPRNumber 
+
+    const refDescription = originalPRNumber
       ? `(${commitDistance} commits ${direction} PR #${originalPRNumber}'s merge)`
       : `(${commitDistance} commits ${direction} reference)`;
-    
-    console.log(
-      "\nSearching GitHub for artifact",
-      ARTIFACT_NAME,
-      `from commit ${clickableCommit} ${refDescription}`
-    );
+
+    console.log("\nSearching GitHub for artifact", ARTIFACT_NAME, `from commit ${clickableCommit} ${refDescription}`);
     console.log(`  "${commitMessage}"`);
   } else {
     console.log(
       "Searching GitHub for artifact",
       ARTIFACT_NAME,
-      `from ${PR_OR_COMMIT.type === "pr" ? "PR #" : "commit"} ${
-        PR_OR_COMMIT.value
-      }...`
+      `from ${PR_OR_COMMIT.type === "pr" ? "PR #" : "commit"} ${PR_OR_COMMIT.value}...`,
     );
   }
 }
@@ -1064,10 +1043,7 @@ if (IS_LLDB || IS_GDB) {
 
   // Collect core dumps and display them as we find them
   for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
-    if (
-      artifact.filename.includes(".tar.gz.age") ||
-      artifact.filename.includes(".cores")
-    ) {
+    if (artifact.filename.includes(".tar.gz.age") || artifact.filename.includes(".cores")) {
       coreDumps.push({ artifact });
 
       // Parse the job name to extract useful info
@@ -1087,10 +1063,8 @@ if (IS_LLDB || IS_GDB) {
     if (!inputProcessed && inputPromise) {
       // Use Promise.race with a tiny timeout to check if input is ready
       const raceResult = await Promise.race([
-        inputPromise.then((v) => ({ type: "input", value: v })),
-        new Promise((resolve) =>
-          setTimeout(() => resolve({ type: "continue" }), 1)
-        ),
+        inputPromise.then(v => ({ type: "input", value: v })),
+        new Promise(resolve => setTimeout(() => resolve({ type: "continue" }), 1)),
       ]);
 
       if (raceResult.type === "input") {
@@ -1121,9 +1095,7 @@ if (IS_LLDB || IS_GDB) {
   }
 
   if (!selectedDump && coreDumps.length === 0) {
-    console.log(
-      `\n❌ No core dumps found for ${PR_OR_COMMIT.type} ${PR_OR_COMMIT.value}.`
-    );
+    console.log(`\n❌ No core dumps found for ${PR_OR_COMMIT.type} ${PR_OR_COMMIT.value}.`);
     process.exit(1);
   }
 
@@ -1158,7 +1130,9 @@ if (IS_LLDB || IS_GDB) {
   const selectedNum = coreDumps.indexOf(selectedDump) + 1;
   const jobUrl = `https://buildkite.com/bun/bun/builds/${selectedDump.artifact.buildId}`;
   // ANSI OSC 8 hyperlink format: \x1b]8;;URL\x1b\\TEXT\x1b]8;;\x1b\\
-  console.log(`\x1b[32m✓ Selected #${selectedNum}: \x1b]8;;${jobUrl}\x1b\\${selectedDump.artifact.jobName}\x1b]8;;\x1b\\\x1b[0m`);
+  console.log(
+    `\x1b[32m✓ Selected #${selectedNum}: \x1b]8;;${jobUrl}\x1b\\${selectedDump.artifact.jobName}\x1b]8;;\x1b\\\x1b[0m`,
+  );
 
   // Check for AGE_CORES_IDENTITY environment variable
   if (!process.env.AGE_CORES_IDENTITY?.startsWith("AGE-SECRET-KEY-")) {
@@ -1176,11 +1150,7 @@ if (IS_LLDB || IS_GDB) {
   // Extract OS
   if (coreFilename.includes("darwin") || coreFilename.includes("macos")) {
     os = "darwin";
-  } else if (
-    coreFilename.includes("alpine") ||
-    coreFilename.includes("debian") ||
-    coreFilename.includes("ubuntu")
-  ) {
+  } else if (coreFilename.includes("alpine") || coreFilename.includes("debian") || coreFilename.includes("ubuntu")) {
     os = "linux";
   } else if (coreFilename.includes("windows")) {
     os = "windows";
@@ -1194,10 +1164,7 @@ if (IS_LLDB || IS_GDB) {
   }
 
   // Check if it's baseline
-  if (
-    coreFilename.includes("baseline") ||
-    selectedDump.artifact.jobName?.includes("baseline")
-  ) {
+  if (coreFilename.includes("baseline") || selectedDump.artifact.jobName?.includes("baseline")) {
     isBaseline = true;
   }
 
@@ -1216,12 +1183,8 @@ if (IS_LLDB || IS_GDB) {
 
     const artifactName = artifact.name.toLowerCase();
     const matchesOS = artifactName.includes(os);
-    const matchesArch = artifactName.includes(
-      arch === "x64" ? "x64" : "aarch64"
-    );
-    const matchesBaseline = isBaseline
-      ? artifactName.includes("baseline")
-      : !artifactName.includes("baseline");
+    const matchesArch = artifactName.includes(arch === "x64" ? "x64" : "aarch64");
+    const matchesBaseline = isBaseline ? artifactName.includes("baseline") : !artifactName.includes("baseline");
     const matchesProfile = artifactName.includes("profile");
 
     if (matchesOS && matchesArch && matchesBaseline && matchesProfile) {
@@ -1233,11 +1196,7 @@ if (IS_LLDB || IS_GDB) {
 
   if (!bunArtifact) {
     process.stdout.write(" ❌\n");
-    console.error(
-      `Could not find: bun-${os}-${arch}${
-        isBaseline ? "-baseline" : ""
-      }-profile`
-    );
+    console.error(`Could not find: bun-${os}-${arch}${isBaseline ? "-baseline" : ""}-profile`);
     process.exit(1);
   }
 
@@ -1249,32 +1208,22 @@ if (IS_LLDB || IS_GDB) {
   process.stdout.write("📥 Downloading artifacts...");
 
   // Start both downloads in parallel
-  const [coresResponse, bunResponse] = await Promise.all([
-    fetch(selectedDump.artifact.url),
-    fetch(bunArtifact.url),
-  ]);
+  const [coresResponse, bunResponse] = await Promise.all([fetch(selectedDump.artifact.url), fetch(bunArtifact.url)]);
 
   if (!coresResponse.ok) {
     process.stdout.write(" ❌\n");
-    throw new Error(
-      `Failed to download core dump: ${coresResponse.statusText}`
-    );
+    throw new Error(`Failed to download core dump: ${coresResponse.statusText}`);
   }
   if (!bunResponse.ok) {
     process.stdout.write(" ❌\n");
-    throw new Error(
-      `Failed to download bun executable: ${bunResponse.statusText}`
-    );
+    throw new Error(`Failed to download bun executable: ${bunResponse.statusText}`);
   }
 
   // Write both files in parallel
   const coresPath = join(dir, selectedDump.artifact.filename);
   const bunPath = join(dir, bunArtifact.filename);
 
-  await Promise.all([
-    Bun.write(coresPath, await coresResponse.blob()),
-    Bun.write(bunPath, await bunResponse.blob()),
-  ]);
+  await Promise.all([Bun.write(coresPath, await coresResponse.blob()), Bun.write(bunPath, await bunResponse.blob())]);
 
   process.stdout.write(" ✓\n");
 
@@ -1285,13 +1234,7 @@ if (IS_LLDB || IS_GDB) {
   // Find the executable
   let bunExecutable: string | null = null;
   const files = readdirSync(dir);
-  const exeFile = files.find(
-    (f) =>
-      f === "bun" ||
-      f === "bun.exe" ||
-      f === "bun-profile" ||
-      f === "bun-profile.exe"
-  );
+  const exeFile = files.find(f => f === "bun" || f === "bun.exe" || f === "bun-profile" || f === "bun-profile.exe");
   if (exeFile) {
     bunExecutable = join(dir, exeFile);
     await $`chmod +x ${bunExecutable}`.quiet();
@@ -1312,7 +1255,7 @@ if (IS_LLDB || IS_GDB) {
   const dirContents = readdirSync(dir);
 
   // First check for core files in the root directory
-  coreFiles = dirContents.filter((f) => f.includes(".core"));
+  coreFiles = dirContents.filter(f => f.includes(".core"));
 
   if (coreFiles.length === 0) {
     // Check nested directories
@@ -1321,14 +1264,8 @@ if (IS_LLDB || IS_GDB) {
       try {
         const stats = Bun.file(itemPath);
         // Check if it's a directory (not a file)
-        if (
-          item.startsWith("bun-cores-") &&
-          !item.endsWith(".age") &&
-          !item.endsWith(".zip")
-        ) {
-          const nestedFiles = readdirSync(itemPath).filter((f) =>
-            f.includes(".core")
-          );
+        if (item.startsWith("bun-cores-") && !item.endsWith(".age") && !item.endsWith(".zip")) {
+          const nestedFiles = readdirSync(itemPath).filter(f => f.includes(".core"));
           for (const file of nestedFiles) {
             await $`mv ${join(itemPath, file)} ${join(dir, file)}`.quiet();
             coreFiles.push(file);
@@ -1369,9 +1306,9 @@ if (IS_LLDB || IS_GDB) {
   // Launch debugger
   const corePath = join(dir, selectedCore);
   const debuggerPath = IS_GDB ? "gdb" : "lldb";
-  
+
   console.log("\n🚀 Launching debugger:");
-  
+
   let debuggerArgs: string[];
   if (IS_GDB) {
     // GDB syntax
@@ -1411,7 +1348,7 @@ for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
         timeStyle: "medium",
         dateStyle: "medium",
         formatMatcher: "best fit",
-      }).format(artifact.createdAt)
+      }).format(artifact.createdAt),
     );
   }
 
@@ -1424,10 +1361,8 @@ for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
     console.log(
       "Downloading",
       JSON.stringify(ARTIFACT_NAME),
-      `from ${PR_OR_COMMIT.type === "pr" ? "PR #" : "commit"} ${
-        PR_OR_COMMIT.value
-      }`,
-      "\n-> " + artifact.url + "\n"
+      `from ${PR_OR_COMMIT.type === "pr" ? "PR #" : "commit"} ${PR_OR_COMMIT.value}`,
+      "\n-> " + artifact.url + "\n",
     );
   }
 
@@ -1449,9 +1384,9 @@ for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
   await $`cp -R ${ARTIFACT_NAME} ${dest}`;
   const files = readdirSync(`./${dest}`);
   const inFolder =
-    files.find((f) => f === "bun" || f === "bun.exe") ||
-    files.find((f) => f === "bun-profile" || f === "bun-profile.exe") ||
-    files.find((f) => f === "bun-asan" || f === "bun-asan.exe");
+    files.find(f => f === "bun" || f === "bun.exe") ||
+    files.find(f => f === "bun-profile" || f === "bun-profile.exe") ||
+    files.find(f => f === "bun-asan" || f === "bun-asan.exe");
   if (inFolder) {
     const inFolderWithoutExtension = inFolder.replaceAll(".exe", "");
     let extension = "";
@@ -1460,7 +1395,7 @@ for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
     }
 
     let fullName = `${inFolderWithoutExtension}-${sha}-${PR_OR_COMMIT.type}${PR_OR_COMMIT.value}${extension}`;
-    const dSYM = files.find((f) => f.toLowerCase().endsWith(".dsym"));
+    const dSYM = files.find(f => f.toLowerCase().endsWith(".dsym"));
     if (dSYM) {
       const dsymDest = `${OUT_DIR}/${fullName}.dSYM`;
       try {
@@ -1483,14 +1418,10 @@ for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
     symlinkSync(
       `${OUT_DIR}/${fullName}`,
       `${OUT_DIR}/${inFolderWithoutExtension}-${PR_OR_COMMIT.value}${extension}`,
-      "file"
+      "file",
     );
-    symlinkSync(
-      `${OUT_DIR}/${fullName}`,
-      `${OUT_DIR}/${inFolderWithoutExtension}-latest${extension}`,
-      "file"
-    );
-    
+    symlinkSync(`${OUT_DIR}/${fullName}`, `${OUT_DIR}/${inFolderWithoutExtension}-latest${extension}`, "file");
+
     if (IS_RUN) {
       // Execute the downloaded binary with passthrough args in the original cwd
       const execPath = `${OUT_DIR}/${inFolderWithoutExtension}-${PR_OR_COMMIT.value}${extension}`;
@@ -1500,7 +1431,7 @@ for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
         stderr: "inherit",
         cwd: originalCwd,
       });
-      
+
       await proc.exited;
       process.exit(proc.exitCode || 0);
     } else {
@@ -1511,12 +1442,9 @@ for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
           "\n\n" +
           "To run the downloaded executable, use any of the following following commands:" +
           "\n\n" +
-          `\x1b[1m\x1b[32m${fullName.replaceAll(
-            ".exe",
-            ""
-          )}${extension}\x1b[0m\n` +
+          `\x1b[1m\x1b[32m${fullName.replaceAll(".exe", "")}${extension}\x1b[0m\n` +
           `\x1b[1m\x1b[32m${inFolderWithoutExtension}-${PR_OR_COMMIT.value}${extension}\x1b[0m\n` +
-          `\x1b[1m\x1b[32m${inFolderWithoutExtension}-latest${extension}\x1b[0m\n`
+          `\x1b[1m\x1b[32m${inFolderWithoutExtension}-latest${extension}\x1b[0m\n`,
       );
     }
   } else {
@@ -1525,7 +1453,5 @@ for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
   process.exit(0);
 }
 
-console.log(
-  `Artifact named ${ARTIFACT_NAME} not found for ${PR_OR_COMMIT.type} ${PR_OR_COMMIT.value}.`
-);
+console.log(`Artifact named ${ARTIFACT_NAME} not found for ${PR_OR_COMMIT.type} ${PR_OR_COMMIT.value}.`);
 process.exit(1);
