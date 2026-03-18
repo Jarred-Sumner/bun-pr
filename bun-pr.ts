@@ -3,7 +3,6 @@
 // This uses the BuildKite browser-facing API instead of the public API.
 // To avoid asking for credentials.
 
-import { Octokit } from "@octokit/rest";
 import { $ } from "bun";
 import { realpathSync, readdirSync, symlinkSync } from "fs";
 import { cp } from "fs/promises";
@@ -169,10 +168,7 @@ async function* getBuildkitePipelineUrl(buildkiteUrl: string) {
 }
 
 async function* getPRCommits(prNumber: number) {
-  const { data: commits } = await octokit.pulls.listCommits({
-    owner: REPO_OWNER,
-    repo: REPO_NAME,
-    pull_number: prNumber,
+  const commits = await github<any[]>(`/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${prNumber}/commits`, {
     per_page: 100,
   });
 
@@ -182,11 +178,7 @@ async function* getPRCommits(prNumber: number) {
 
   // Start with newest commits
   for (const commit of commits) {
-    const { data: statuses } = await octokit.repos.listCommitStatusesForRef({
-      owner: REPO_OWNER,
-      repo: REPO_NAME,
-      ref: commit.sha,
-    });
+    const statuses = await github<any[]>(`/repos/${REPO_OWNER}/${REPO_NAME}/commits/${commit.sha}/statuses`);
 
     const buildkiteStatuses = statuses
       .filter(status => status.context.includes("buildkite"))
@@ -448,9 +440,24 @@ const IS_RUN = (() => {
 
 // We'll collect passthrough args later after we identify the PR/commit
 
-const octokit = new Octokit({
-  auth: GITHUB_TOKEN,
-});
+async function github<T = any>(path: string, params?: Record<string, string | number | undefined>): Promise<T> {
+  const url = new URL(`https://api.github.com${path}`);
+  if (params) {
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined) url.searchParams.set(key, String(value));
+    }
+  }
+  const response = await fetch(url.toString(), {
+    headers: {
+      Accept: "application/vnd.github.v3+json",
+      ...(GITHUB_TOKEN ? { Authorization: `token ${GITHUB_TOKEN}` } : {}),
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`GitHub API error: ${response.status} ${response.statusText} for ${path}`);
+  }
+  return response.json() as Promise<T>;
+}
 
 const ARTIFACT_NAME = (() => {
   let basename = "bun-";
@@ -506,21 +513,12 @@ function isArtifactName(name: string) {
 
 // Add this new function to fetch commit details
 async function getCommitDetails(sha: string) {
-  const { data: commitData } = await octokit.repos.getCommit({
-    owner: REPO_OWNER,
-    repo: REPO_NAME,
-    ref: sha,
-  });
-  return commitData;
+  return github(`/repos/${REPO_OWNER}/${REPO_NAME}/commits/${sha}`);
 }
 
 // Get the merge commit of a PR
 async function getMergeCommit(prNumber: number): Promise<{ sha: string; date: string } | null> {
-  const { data: pr } = await octokit.pulls.get({
-    owner: REPO_OWNER,
-    repo: REPO_NAME,
-    pull_number: prNumber,
-  });
+  const pr = await github(`/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${prNumber}`);
 
   if (!pr.merged) {
     return null;
@@ -546,26 +544,15 @@ async function findCommitWithArtifacts(
 
   // We'll fetch commits in both directions from the merge date
   // This handles cases where the merge commit itself isn't in the linear history
-  const fetchOptions: any = {
-    owner: REPO_OWNER,
-    repo: REPO_NAME,
-    sha: "main",
-    per_page: 100,
-  };
+  const commitsPath = `/repos/${REPO_OWNER}/${REPO_NAME}/commits`;
+  const baseParams = { sha: "main", per_page: 100 };
 
-  // Fetch commits around the merge date
-  // We need commits both before and after to find the right position
-  const beforeOptions = { ...fetchOptions, until: mergeDate };
-  const afterOptions = { ...fetchOptions, since: mergeDate };
-
-  // Fetch commits in parallel
-  const [beforeResponse, afterResponse] = await Promise.all([
-    octokit.repos.listCommits(beforeOptions),
-    octokit.repos.listCommits(afterOptions),
+  const [beforeCommits, afterCommits] = await Promise.all([
+    github<any[]>(commitsPath, { ...baseParams, until: mergeDate }),
+    github<any[]>(commitsPath, { ...baseParams, since: mergeDate }),
   ]);
 
-  // Combine them (after commits first, then before)
-  allCommits = [...afterResponse.data, ...beforeResponse.data];
+  allCommits = [...afterCommits, ...beforeCommits];
 
   // Remove duplicates based on SHA
   const seen = new Set<string>();
@@ -650,11 +637,7 @@ async function findCommitWithArtifacts(
       }
 
       // Check if this commit has buildkite artifacts
-      const { data: statuses } = await octokit.repos.listCommitStatusesForRef({
-        owner: REPO_OWNER,
-        repo: REPO_NAME,
-        ref: commit.sha,
-      });
+      const statuses = await github<any[]>(`/repos/${REPO_OWNER}/${REPO_NAME}/commits/${commit.sha}/statuses`);
 
       const buildkiteStatus = statuses.find(s => s.context === "buildkite/bun");
       if (buildkiteStatus?.target_url) {
@@ -730,27 +713,19 @@ let PR_OR_COMMIT = await (async () => {
     $.cwd(cwd);
     if (currentBranchName === "main" || currentBranchName === "master") {
       // return the most recent commit
-      const { data: commits } = await octokit.repos.listCommits({
-        owner: REPO_OWNER,
-        repo: REPO_NAME,
-        per_page: 1,
-      });
+      const commits = await github<any[]>(`/repos/${REPO_OWNER}/${REPO_NAME}/commits`, { per_page: 1 });
       return { type: "commit", value: commits[0].sha };
     }
 
     // get the current PR o r commit
-    const { data: prs } = await octokit.pulls.list({
-      owner: REPO_OWNER,
-      repo: REPO_NAME,
+    const prs = await github<any[]>(`/repos/${REPO_OWNER}/${REPO_NAME}/pulls`, {
       state: "open",
       head: `${REPO_OWNER}:${currentBranchName}`,
     });
     if (prs.length) {
       return { type: "pr", value: prs[0].number.toString() };
     } else {
-      const { data: commits } = await octokit.repos.listCommits({
-        owner: REPO_OWNER,
-        repo: REPO_NAME,
+      const commits = await github<any[]>(`/repos/${REPO_OWNER}/${REPO_NAME}/commits`, {
         sha: currentBranchName,
         per_page: 1,
       });
@@ -781,9 +756,7 @@ let PR_OR_COMMIT = await (async () => {
   } else {
     // resolve branch name to PR number or latest commit from argv
     const branch = last;
-    let { data: prs = [] } = await octokit.pulls.list({
-      owner: REPO_OWNER,
-      repo: REPO_NAME,
+    const prs = await github<any[]>(`/repos/${REPO_OWNER}/${REPO_NAME}/pulls`, {
       state: "open",
       head: `${REPO_OWNER}:${branch}`,
     });
@@ -791,9 +764,7 @@ let PR_OR_COMMIT = await (async () => {
     if (prs.length) {
       return { type: "pr", value: prs[0].number.toString() };
     } else {
-      const { data: commits } = await octokit.repos.listCommits({
-        owner: REPO_OWNER,
-        repo: REPO_NAME,
+      const commits = await github<any[]>(`/repos/${REPO_OWNER}/${REPO_NAME}/commits`, {
         sha: branch,
         per_page: 1,
       });
@@ -974,18 +945,14 @@ if (!IS_LLDB && !IS_GDB && !IS_RUN) {
 
 if (PR_OR_COMMIT.type === "pr") {
   // Get PR details to find the head commit SHA
-  const response = await octokit.pulls.get({
-    owner: REPO_OWNER,
-    repo: REPO_NAME,
-    pull_number: Number(PR_OR_COMMIT.value),
-  });
+  const pr = await github(`/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${Number(PR_OR_COMMIT.value)}`);
 
-  if (!response.data?.statuses_url || !response.data?.head?.sha) {
+  if (!pr?.statuses_url || !pr?.head?.sha) {
     throw new Error(`Failed to fetch PR data for PR #${PR_OR_COMMIT.value}`);
   }
 
-  statusesUrl = response.data.statuses_url;
-  prData = response.data;
+  statusesUrl = pr.statuses_url;
+  prData = pr;
 } else {
   // Get commit details
   const response = await getCommitDetails(PR_OR_COMMIT.value);

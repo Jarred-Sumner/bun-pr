@@ -1,6 +1,6 @@
 {
   "name": "bun-pr",
-  "version": "1.0.39",
+  "version": "1.0.41",
   "module": "bun-pr.ts",
   "type": "module",
   "bin": {
@@ -9,9 +9,6 @@
   },
   "devDependencies": {
     "@types/bun": "latest"
-  },
-  "dependencies": {
-    "@octokit/rest": "^20.0.2"
   },
   "files": [
     "bun-pr.ts",
