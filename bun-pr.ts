@@ -45,6 +45,7 @@ type BuildkiteBuild = {
   blocked: boolean;
   message: string;
   commit: string;
+  commit_id: string;
   branch: string;
   env: Record<string, any>;
   source: string;
@@ -168,25 +169,31 @@ async function* getBuildkitePipelineUrl(buildkiteUrl: string) {
 }
 
 async function* getPRCommits(prNumber: number) {
-  const commits = await github<any[]>(`/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${prNumber}/commits`, {
-    per_page: 100,
-  });
+  const { commits: total, base, head } = prData!;
 
-  commits.sort(
-    (a, b) => new Date(b.commit?.author?.date || "").getTime() - new Date(a.commit?.author?.date || "").getTime(),
-  );
+  // /pulls/N/commits stops at 250 commits, /compare keeps paginating past that.
+  const path =
+    total > 250
+      ? `/repos/${REPO_OWNER}/${REPO_NAME}/compare/${base.sha}...${head.sha}`
+      : `/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${prNumber}/commits`;
 
-  // Start with newest commits
-  for (const commit of commits) {
-    const statuses = await github<any[]>(`/repos/${REPO_OWNER}/${REPO_NAME}/commits/${commit.sha}/statuses`);
+  // Both endpoints list the oldest commits first, so the PR's head is on the last page.
+  for (let page = Math.ceil(total / 100); page >= 1; page--) {
+    const response = await github<any>(path, { per_page: 100, page });
+    const commits: any[] = response.commits ?? response;
 
-    const buildkiteStatuses = statuses
-      .filter(status => status.context.includes("buildkite"))
-      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    // Start with newest commits
+    for (const commit of commits.reverse()) {
+      const statuses = await github<any[]>(`/repos/${REPO_OWNER}/${REPO_NAME}/commits/${commit.sha}/statuses`);
 
-    for (const status of buildkiteStatuses) {
-      if (status.target_url) {
-        yield status.target_url;
+      const buildkiteStatuses = statuses
+        .filter(status => status.context.includes("buildkite"))
+        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+      for (const status of buildkiteStatuses) {
+        if (status.target_url) {
+          yield status.target_url;
+        }
       }
     }
   }
@@ -317,6 +324,7 @@ async function* getBuildArtifacts(buildkiteUrl: string, options?: { includeAllJo
             jobName: build.name,
             stepKey: build.step_key,
             buildId: buildkiteID,
+            commit: result.commit_id,
           };
         } catch (error) {
           console.debug(`Failed to parse artifact URL: ${error}`);
@@ -841,7 +849,7 @@ async function checkAndRunExisting(): Promise<boolean> {
 // Don't check for existing executable early if we need to resolve --before/--after first
 
 // Modify the main download loop
-type PRData = { statuses_url: string; head: { sha: string } };
+type PRData = { statuses_url: string; commits: number; base: { sha: string }; head: { sha: string } };
 type CommitData = { url: string; sha: string };
 
 let statusesUrl: string;
@@ -1317,6 +1325,11 @@ for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
         formatMatcher: "best fit",
       }).format(artifact.createdAt),
     );
+    if (prData && artifact.commit && artifact.commit !== prData.head.sha) {
+      console.log(
+        `\x1b[33mNo ${ARTIFACT_NAME} artifact yet for the PR's latest commit (${prData.head.sha.substring(0, 7)}), using the build of ${artifact.commit.substring(0, 7)} instead\x1b[0m`,
+      );
+    }
   }
 
   const response = await fetch(artifact.url);
@@ -1336,8 +1349,8 @@ for await (const artifact of await getBuildArtifactUrls(statusesUrl)) {
   const blob = await response.blob();
   const filename = `${ARTIFACT_NAME}-${PR_OR_COMMIT.type}-${PR_OR_COMMIT.value}-${artifact.shasum}.zip`;
 
-  // Get the appropriate SHA based on whether this is a PR or commit
-  const sha = PR_OR_COMMIT.type === "pr" ? prData?.head.sha : commitData?.sha;
+  // Prefer the commit the artifact was built from, which isn't always the PR's latest commit
+  const sha = artifact.commit || (PR_OR_COMMIT.type === "pr" ? prData?.head.sha : commitData?.sha);
 
   if (!sha) {
     throw new Error("Failed to get commit SHA");
